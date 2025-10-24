@@ -113,6 +113,46 @@ graph TD
 * **训练:** 使用 AdamW 优化器分别训练 DiT 和 RLAgent。支持模型检查点 (Checkpointing) 的保存与加载。
 * **实验控制:** 通过配置文件 (`YAML`) 控制 RL 引导、数据增强等关键开关，便于进行消融实验。
 
+### 文件说明 (File Descriptions)
+
+以下是项目主要文件和目录的说明：
+
+* **`configs/default_config.yaml`**:
+    * **作用**: 项目的中央控制文件。包含所有超参数，如模型维度、学习率、扩散步数、批次大小，以及用于实验控制的开关（如 `enable_rl_guidance`, `enable_augmentation`）和评估器指标的权重。
+    * **修改**: 调整实验设置、模型大小、训练时长等。
+
+* **`data/`**:
+    * **`initial_dataset/`**: 存放用于启动训练过程的“种子”机构数据。
+        * `metadata.json`: 索引该目录下所有 `.npz` 文件的元数据。
+        * `*.npz`: 每个文件包含一个机构的 `(N, N, 4)` 特征张量（`mechanism_tensor`）。
+    * **`augmented_dataset/`**: 存放由模型生成、并通过评估器筛选批准的新机构数据。结构与 `initial_dataset` 相同。也用作 RL 智能体的 Replay Buffer。
+
+* **`data_preparation/create_mechanism_data.py`**:
+    * **作用**: 一个独立的工具脚本，用于根据用户定义的参数（如 `edge_list`）生成初始数据集所需的 `.npz` 文件。
+    * **使用**: 在项目开始或需要添加新的种子数据时运行。
+
+* **`src/`**: 存放核心源代码。
+    * **`diffusion_model/`**: 包含 DiT（扩散 Transformer）模型的实现。
+        * **`modules.py`**: 定义构成 DiT 的基础模块（Patch 嵌入、Transformer 块、时间嵌入、adaLN 等）。
+        * **`model.py`**: 组装 `modules.py` 中的组件，构建完整的 `DiffusionModel` 类，并包含核心的扩散（`q_sample`）和带引导/钳位的采样（`p_sample`, `sample`）逻辑。
+    * **`rl_agent/agent.py`**: 实现强化学习智能体 (`RLAgent`)。
+        * **作用**: 作为一个奖励预测模型（基于 Transformer），学习预测给定嘈杂状态 `x_t` 和时间 `t` 的最终奖励。提供用于引导 DiT 采样的梯度 (`get_guidance_fn`)，并包含根据经验数据更新自身策略的逻辑 (`update_policy`)。
+    * **`evaluator/evaluator.py`**: 实现机构评估器 (`MechanismEvaluator`)，作为 RL 的奖励函数。
+        * **作用**: 从配置文件加载启用的指标及其权重。接收一个（未归一化的）机构张量，解码其拓扑结构（使用 `networkx`），调用所有启用的指标函数（如检查连通性、计算自由度、检查相似性、节点数惩罚等），计算加权总奖励分数 `R_total`。
+    * **`utils/dataloader.py`**: 处理数据的加载和保存。
+        * **作用**: 定义 `MechanismDataset` 类，根据 `metadata.json` 文件加载 `.npz` 数据。提供 `get_dataloader` 函数创建 PyTorch DataLoader。包含 `add_mechanisms_to_dataset` 函数，用于将新批准的机构保存到 `augmented_dataset` 并更新其 `metadata.json`。
+    * **`pipeline.py`**: 项目的核心“指挥家”。
+        * **作用**: 实现 `TrainingPipeline` 类，负责初始化所有模块（模型、评估器、RL智能体、优化器），并执行核心的“三步循环”（引导生成 -> 评估 & 训练RL -> 扩充 & 训练DiT）。处理数据归一化、模型保存/加载、实验开关逻辑。
+
+* **`scripts/train.py`**:
+    * **作用**: 项目的唯一入口点。负责解析命令行参数（如配置文件路径），加载配置，初始化 `TrainingPipeline`，并调用 `pipeline.run()` 启动整个训练过程。包含必要的路径设置以确保 `src` 目录能被正确导入。
+
+* **`requirements.txt`**:
+    * **作用**: 列出项目运行所需的所有 Python 依赖库及其建议版本。方便在新环境中快速设置。
+
+* **`README.md`**:
+    * **作用**: (本文件) 提供项目的全面介绍、架构说明、使用指南、技术路线图和协作信息。
+
 ## 6. 当前状态与挑战
 
 * **已完成:**
