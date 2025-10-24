@@ -1,0 +1,94 @@
+# configs/default_config.yaml
+
+project_name: "GenRLMechSyn"
+timestamp: "20251023"
+
+# --- 数据集设置 ---
+data:
+  initial_manifest_path: "data/initial_dataset/metadata.json"
+  augmented_manifest_path: "data/augmented_dataset/metadata.json"
+  max_nodes: 30 # 用于张量填充, 必须与 diffusion_model.img_size 一致
+  
+  # 全局归一化缩放值
+  # 扩散模型在 [-1, 1] 范围内工作效果最好
+  # 我们假设机构参数 (a, alpha, d) 的大致最大值为 10.0
+  # x_norm = (x / normalization_value) * 2.0 - 1.0
+  normalization_value: 10.0 
+
+# --- 训练参数 ---
+training:
+  num_cycles: 50        # 总共进行多少轮“生成-增强”循环
+  epochs_per_cycle: 100 # 每个循环中, 扩散模型训练多少个 epoch
+  batch_size: 16        # DiT 模型显存占用较大, 建议从 16 开始
+  learning_rate: 0.0001
+  rl_learning_rate: 0.00001
+  device: "cuda"        # 如果有NVIDIA GPU, 使用 "cuda", 否则使用 "cpu"
+
+  # --- 模型保存与加载 ---
+  save_checkpoint_path: "checkpoints/dit_model.pth" # 保存权重到这个文件
+  load_checkpoint_path: "checkpoints/dit_model.pth" # 默认不加载 (设为 "checkpoints/dit_model.pth" 来加载)
+
+  enable_rl_guidance: true   # true: RLAgent 会引导 DiT 采样
+    # false: 纯 DiT 采样 (guidance_fn = None)
+  enable_augmentation: true  # true: 高分机构会被保存到 augmented_dataset
+  # false: 数据集不会被扩充
+
+# --- 模型参数 (DiT) ---
+diffusion_model:
+  # 数据/Patch 形状
+  img_size: 30       # 必须与 data.max_nodes 一致
+  patch_size: 5      # 30 % 5 == 0
+  in_channels: 4     # 新: [exists, a, alpha, d]
+  
+  # Transformer 架构
+  embed_dim: 768     # Transformer 隐藏层维度
+  depth: 12          # Transformer 块 (blocks) 的数量
+  num_heads: 12        # 注意力头的数量
+  
+  # 扩散过程
+  timesteps: 1000
+  schedule_type: "cosine" # 推荐 'cosine', 备选 'linear'
+
+# --- 生成与评估 ---
+generation:
+  num_to_generate: 100 # 每个循环生成多少个新机构
+  acceptance_threshold: 0.7 # 评估分数高于此阈值的机构才会被接受
+  rl_guidance_scale: 1.0  # (如果 rl_guidance=true, 此缩放才生效)
+
+# --- 评估器配置 (动态奖励函数) ---
+evaluator_config:
+  # R_total = SUM( weight * score_of_function )
+  #
+  # 'enable': (true/false) 是否运行此评估函数
+  # 'weight': (float) 此函数的分数所占的权重
+  #
+  # 注意: 评估器会按此列表的顺序执行。
+  # 关键的 "硬约束" (如连通性) 应该放在最前面。
+
+  indicators:
+
+    # --- 1. 硬约束: 必须是一个有效的图 ---
+    # (此函数应返回 1.0 (通过) 或 -1.0 (失败))
+    check_connectivity:
+      enable: false
+      weight: 1.0  # R_total += 1.0 * (1.0 or -1.0)
+                   # (如果失败, evaluator 会 "fail-fast" 并立即返回)
+
+    # --- 2. 物理有效性: 必须是 1-DoF 机构 ---
+    # (此函数应返回 1.0 (DoF=1) 或 -0.5 (DoF != 1))
+    check_dof:
+      enable: false
+      weight: 1.0  # R_total += 1.0 * (1.0 or -0.5)
+
+    # --- 3. 相似性偏好: 奖励 4 杆机构 ---
+    # (此函数应返回 1.0 (4杆) 或 0.0 (其他))
+    check_topology_similarity:
+      enable: true
+      weight: 1.0  # R_total += 1.0 * (1.0 or 0.0)
+                   # (这就是您之前的 w_similarity)
+
+    # --- 4.  添加节点数惩罚 ---
+    check_node_count_penalty:
+      enable: true
+      weight: 1.0 # <-- 权重设为 1.0 (因为函数本身返回负值)
+      # R_total += 1.0 * ( penalty )

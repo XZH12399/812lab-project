@@ -1,0 +1,92 @@
+[
+  {
+    "id": "bennett_001",
+    "data_path": "bennett_001.npz",
+    "metadata": {
+      "source": "initial",
+      "name": "Bennett Mechanism (Set 1)",
+      "description": "Spatial: a=10/14.14, alpha=0.785/0.524"
+    }
+  },
+  {
+    "id": "bennett_002",
+    "data_path": "bennett_002.npz",
+    "metadata": {
+      "source": "initial",
+      "name": "Bennett Mechanism (Set 2)",
+      "description": "Spatial: a=8/14.05, alpha=1.0/0.5"
+    }
+  },
+  {
+    "id": "bennett_003",
+    "data_path": "bennett_003.npz",
+    "metadata": {
+      "source": "initial",
+      "name": "Bennett Mechanism (Set 3)",
+      "description": "Spatial: a=24.74/15, alpha=0.6/1.2"
+    }
+  },
+  {
+    "id": "bennett_004",
+    "data_path": "bennett_004.npz",
+    "metadata": {
+      "source": "initial",
+      "name": "Planar 4-Bar Mechanism (Set 1)",
+      "description": "Planar: a=7/9, alpha=0.0"
+    }
+  },
+  {
+    "id": "bennett_005",
+    "data_path": "bennett_005.npz",
+    "metadata": {
+      "source": "initial",
+      "name": "Planar 4-Bar Mechanism (Set 2)",
+      "description": "Planar: a=12/5, alpha=0.0"
+    }
+  },
+  {
+    "id": "bennett_006",
+    "data_path": "bennett_006.npz",
+    "metadata": {
+      "source": "initial",
+      "name": "Bennett Mechanism (Set 4)",
+      "description": "Spatial: a=12/7.6, alpha=1.1/0.6"
+    }
+  },
+  {
+    "id": "bennett_007",
+    "data_path": "bennett_007.npz",
+    "metadata": {
+      "source": "initial",
+      "name": "Bennett Mechanism (Set 5)",
+      "description": "Spatial: a=5/10.06, alpha=0.4/0.9"
+    }
+  },
+  {
+    "id": "bennett_008",
+    "data_path": "bennett_008.npz",
+    "metadata": {
+      "source": "initial",
+      "name": "Bennett Mechanism (Set 6)",
+      "description": "Spatial: a=20/29.74, alpha=0.2/0.3"
+    }
+  },
+  {
+    "id": "bennett_009",
+    "data_path": "bennett_009.npz",
+    "metadata": {
+      "source": "initial",
+      "name": "Planar 4-Bar Mechanism (Set 3)",
+      "description": "Planar: a=15/10, alpha=0.0"
+    }
+  },
+  {
+    "id": "bennett_010",
+    "data_path": "bennett_010.npz",
+    "metadata": {
+      "source": "initial",
+      "name": "Planar 4-Bar Mechanism (Set 4)",
+      "description": "Planar: a=4/16, alpha=0.0"
+    }
+  }
+]
