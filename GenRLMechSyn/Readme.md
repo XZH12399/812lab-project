@@ -50,15 +50,37 @@
 
 ```mermaid
 graph TD
-    A[小型初始数据集] --> B{1. 扩散模型生成机构};
-    B --> C[2. 评估模块计算性能指标];
-    C --> D{3. 机构是否满足要求?};
-    D -- 是 --> E[4. 扩充数据集];
-    E --> A;
-    D -- 否 --> F[丢弃];
-    E --> G[5. 训练RL智能体];
-    G --> H[6. RL策略引导生成过程];
-    H --> B;
+    %% 定义节点
+    InitData[初始数据集]
+    AugData[增强数据集]
+    DiT[DiT模型 模仿者]
+    RLA[RL智能体 探索者]
+    Eval[评估器 奖励函数]
+
+    TrainDiT[训练DiT模型]
+    Generate[生成新机构]
+    Evaluate[评估机构与生成经验]
+    TrainRL[训练RL智能体]
+    Augment[扩充数据集]
+
+    %% 描述流程 (以数据流为主线)
+    InitData --> TrainDiT
+    AugData --> TrainDiT
+
+    TrainDiT -->|"更新模型"| DiT
+
+    DiT --> Generate
+    RLA -->|"引导"| Generate
+
+    Generate -->|"新机构"| Evaluate
+
+    Eval -->|"计算分数"| Evaluate
+
+    Evaluate -->|"所有(机构, 分数)经验"| TrainRL
+    TrainRL -->|"更新权重"| RLA
+
+    Evaluate -->|"高分机构"| Augment
+    Augment -->|"保存"| AugData
 ```
 
 ## 4. 数据表示法：`(N, N, 4)` 特征张量
