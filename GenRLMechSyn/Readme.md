@@ -50,15 +50,40 @@
 
 ```mermaid
 graph TD
-    A[小型初始数据集] --> B{1. 扩散模型生成机构};
-    B --> C[2. 评估模块计算性能指标];
-    C --> D{3. 机构是否满足要求?};
-    D -- 是 --> E[4. 扩充数据集];
-    E --> A;
-    D -- 否 --> F[丢弃];
-    E --> G[5. 训练RL智能体];
-    G --> H[6. RL策略引导生成过程];
-    H --> B;
+    %% 定义节点
+    DiT[DiT Model (模仿者)]
+    RLA[RL Agent (探索者)]
+    Eval[评估器 (裁判 R_total)]
+    InitData[初始数据]
+    AugData[增强数据]
+
+    Generate[1. 引导生成]
+    EvaluateAndTrainRL[2. 评估 & 训练RL]
+    AugmentAndTrainDiT[3. 扩充 & 训练DiT]
+
+    %% 描述流程
+    DiT -->|"基础预测"| Generate
+    RLA -->|"引导梯度"| Generate
+
+    Generate -->|"新机构 (未归一化)"| EvaluateAndTrainRL
+
+    Eval -->|"计算 R_total"| EvaluateAndTrainRL
+
+    EvaluateAndTrainRL -->|"所有 (机构_归一化, 分数)"| RLA %% RL训练输入
+    RLA -->|"更新权重"| RLA %% RL训练输出 (更新自身)
+
+    EvaluateAndTrainRL -->|"高分机构 (未归一化)"| AugmentAndTrainDiT %% 触发扩充
+
+    AugData -->|"保存数据"| AugmentAndTrainDiT %% 扩充动作
+
+    InitData -->|"加载"| AugmentAndTrainDiT %% DiT训练输入1
+    AugData -->|"加载"| AugmentAndTrainDiT %% DiT训练输入2
+
+    AugmentAndTrainDiT -->|"训练 (MSE Loss)"| DiT %% DiT训练输出 (更新自身)
+
+    %% 隐含的循环: 更新后的模型用于下一次生成
+    DiT --> Generate
+    RLA --> Generate
 ```
 
 ## 4. 数据表示法：`(N, N, 4)` 特征张量
