@@ -170,7 +170,7 @@ graph TD
 
 ## 8. 协作指南
 
-* **代码仓库:** [[请在此处填入您的 GitHub 仓库链接]](https://github.com/XZH12399/812lab-project.git)
+* **代码仓库:** [https://github.com/XZH12399/812lab-project.git]
 * **分支策略:** 请遵循 Git Flow 或 GitHub Flow。
     * 从 `main` 分支创建特性分支 (e.g., `feature/improve-evaluator`)。
     * 完成开发后，提交 Pull Request (PR) 到 `main` 分支。
