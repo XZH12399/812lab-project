@@ -121,11 +121,16 @@ graph TD
     * **负责人:** [待认领]
     * **描述:** 确保 DiT 经过充分预训练后，能够生成更接近稀疏结构（而不是全连接噪声）的张量。尝试更长的预训练时间、检查钳位逻辑。
     * **目标:** 让 DiT 在无引导或弱引导下，也能生成包含清晰结构（即使无效）的样本。
-* **任务 1.3 (评估器): 完善 DoF 计算 (空间机构)**
+* **任务 1.3 (评估器): 完善机构评价指标**
     * **负责人:** [待认领]
-    * **描述:** 将 `_calculate_DoF` 函数从平面格拉布勒公式，扩展为适用于空间机构的通用自由度计算方法（如 Kutzbach 公式）。
-    * **目标:** 使评估器能够准确判断空间机构的自由度。
-* **任务 1.4 (实验): 建立基线**
+    * **描述:** 对 `src/evaluator/evaluator.py` 中的**所有**指标函数进行审查、改进和扩展。这包括但不限于：
+        * 将 `_calculate_DoF` 函数从平面格拉布勒公式扩展为适用于空间机构的通用自由度计算方法（如 Kutzbach 公式），或者采用螺旋理论判断机构自由度。
+        * **改进** `_check_connectivity`，可能加入更严格的拓扑有效性检查（例如，避免过短/过长的连杆，检查是否有干涉等）。
+        * **完善** `_check_topology_similarity`，使其不仅仅基于节点/边数量，可能引入更细致的图结构相似性度量。
+        * **调整** `_check_node_count_penalty` 的惩罚函数和权重，找到最佳平衡点。
+        * **探索并添加**新的、通用的评价指标，以更好地衡量机构的“质量”或“物理合理性”，为 RL 提供更丰富的奖励信号。
+    * **目标:** 提升 `Evaluator` 区分“好”机构与“坏”机构的能力，使其奖励信号更准确、信息更丰富，从而更好地指导 RL 智能体的学习和 DiT 模型的生成。
+* **任务 1.4 (实验): 建立基线（暂时可以不做）**
     * **负责人:** [待认领]
     * **描述:** 使用配置开关，运行纯 DiT (无 RL，无增强) 和 DiT + 增强 (无 RL) 的实验，记录 Loss 曲线和生成成功率，作为后续比较的基准。
     * **目标:** 定量评估 RL 引导和数据增强各自的贡献。
@@ -181,8 +186,8 @@ graph TD
 
 ## 9. 快速开始 (Getting Started)
 
-1.  **克隆仓库:** `git clone [仓库链接]`
-2.  **创建环境:** 推荐使用 Conda: `conda create -n aidmech python=3.9 && conda activate aidmech`
+1.  **克隆仓库:** `git clone https://github.com/XZH12399/812lab-project.git`
+2.  **创建环境:** 推荐使用 Conda: `conda create -n AIDesign python=3.9 && conda activate AIDesign`
 3.  **安装依赖:** `pip install -r requirements.txt`
 4.  **准备数据:** `python data_preparation/create_mechanism_data.py`
 5.  **配置实验:** 编辑 `configs/default_config.yaml` (特别是 `device`, `enable_...` 开关)。
