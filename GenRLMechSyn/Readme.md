@@ -81,11 +81,6 @@ graph TD
 
     Evaluate -->|"高分机构"| Augment
     Augment -->|"保存"| AugData
-
-    %% 隐含循环: 更新后的模型和数据用于下一轮
-    DiT --> Generate
-    RLA --> Generate
-    AugData --> TrainDiT
 ```
 
 ## 4. 数据表示法：`(N, N, 4)` 特征张量
