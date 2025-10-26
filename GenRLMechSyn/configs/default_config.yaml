@@ -7,7 +7,7 @@ timestamp: "20251023"
 data:
   initial_manifest_path: "data/initial_dataset/metadata.json"
   augmented_manifest_path: "data/augmented_dataset/metadata.json"
-  max_nodes: 30 # 用于张量填充, 必须与 diffusion_model.img_size 一致
+  max_nodes: 6 # 用于张量填充, 必须与 diffusion_model.img_size 一致
   
   # 全局归一化缩放值
   # 扩散模型在 [-1, 1] 范围内工作效果最好
@@ -38,14 +38,16 @@ training:
 
   enable_rl_guidance: true   # true: RLAgent 会引导 DiT 采样
                              # false: 纯 DiT 采样 (guidance_fn = None)
-  enable_augmentation: true  # true: 高分机构会被保存到 augmented_dataset
+  enable_augmentation: false  # true: 高分机构会被保存到 augmented_dataset
                              # false: 数据集不会被扩充
+
+  random_seed: 42 # 添加随机数种子
 
 # --- 模型参数 (DiT) ---
 diffusion_model:
   # 数据/Patch 形状
-  img_size: 30       # 必须与 data.max_nodes 一致
-  patch_size: 5      # 30 % 5 == 0
+  img_size: 6       # 必须与 data.max_nodes 一致
+  patch_size: 2      # 30 % 5 == 0
   in_channels: 4     # 新: [exists, a, alpha, d]
   
   # Transformer 架构
