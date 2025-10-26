@@ -57,8 +57,8 @@ class DiffusionModel(nn.Module):
     一个完整的 DiT (Diffusion Transformer) 模型.
     它包含了神经网络架构和扩散/采样逻辑.
     使用 4 通道输入: [exists, a, alpha, d].
+    (钳位操作移至 sample 函数末尾)
     """
-
     def __init__(self, config):
         """
         初始化模型.
@@ -259,10 +259,10 @@ class DiffusionModel(nn.Module):
         x_0_pred_norm = sqrt_recip_alphas_cumprod_t * (x_t_norm - sqrt_one_minus_alphas_cumprod_t * noise_norm)
         return x_0_pred_norm
 
-    # --- 反向去噪与钳位 (p_sample) ---
+    # --- (核心修正!) 反向去噪 (p_sample, 无中间钳位) ---
     def p_sample(self, x_t_norm, t, t_index, guidance_fn=None, guidance_scale=1.0):
         """
-        (修正后版本) 反向去噪一步, 支持RL引导和【4通道钳位】.
+        (修正后版本!) 反向去噪一步, 支持RL引导, 但 **不进行中间钳位**.
         输入: 归一化的 x_t_norm
         输出: 归一化的 x_{t-1}_norm
         """
@@ -271,89 +271,88 @@ class DiffusionModel(nn.Module):
         sqrt_one_minus_alphas_cumprod_t = self._get_tensor_values(self.sqrt_one_minus_alphas_cumprod, t)
         sqrt_recip_alphas_t = self._get_tensor_values(self.sqrt_recip_alphas, t)
 
-        # 2. 预测归一化的噪声
+        # 2. 预测归一化的噪声 (DiT 的意见)
         predicted_noise_norm = self.forward(x_t_norm, t)
 
-        # 3. (可选) RL 引导
+        # 3. (可选) RL 引导 (RL Agent 的意见)
         if guidance_fn is not None:
             gradient = guidance_fn(x_t_norm, t)
+            # 应用引导 (与之前相同)
             predicted_noise_norm = predicted_noise_norm - sqrt_one_minus_alphas_cumprod_t * guidance_scale * gradient
 
         # 4. 计算 x_0 的初步估计 (归一化)
+        #    *** 使用可能被引导过的噪声 ***
         x_0_pred_norm = self._x0_from_noise(x_t_norm, t, predicted_noise_norm)
 
-        # --- 5. 应用【引导性钳位 (4通道)】 ---
-        # 5a. 反归一化
-        x_0_pred_unnorm = self._unnormalize(x_0_pred_norm)
+        # --- 5. (已移除!) 不再进行中间钳位 ---
 
-        # 5b. 分离通道
-        exists_unnorm, a_unnorm, alpha_unnorm, d_unnorm = torch.chunk(x_0_pred_unnorm, 4, dim=1)
-
-        # 5c. 钳位 exists 通道 (阈值 0.5)
-        exists_clamped = (exists_unnorm > 0.8).float()  # 变为 0.0 或 1.0
-
-        # 5d. 钳位 a, alpha, d 通道
-        a_clamped = torch.clamp(a_unnorm, min=0.0)
-        alpha_clamped = torch.clamp(alpha_unnorm, min=0.0, max=math.pi / 2.0)
-        d_clamped = torch.clamp(d_unnorm, min=0.0)
-
-        # 5e. 如果 exists=0, 强制 a,alpha,d 为 0
-        a_clamped = a_clamped * exists_clamped
-        alpha_clamped = alpha_clamped * exists_clamped
-        d_clamped = d_clamped * exists_clamped
-
-        # 5f. 重新组合通道 (未归一化)
-        x_0_clamped_unnorm = torch.cat([exists_clamped, a_clamped, alpha_clamped, d_clamped], dim=1)
-
-        # 5g. 重新归一化回 [-1, 1]
-        x_0_clamped_norm = self._normalize(x_0_clamped_unnorm)
-
-        # --- 6. 使用【被修正过】的 x_0_clamped_norm 计算 x_{t-1} 的均值 ---
+        # --- 6. 使用【原始预测】的 x_0_pred_norm 计算 x_{t-1} 的均值 ---
         posterior_mean_coef1_t = self._get_tensor_values(self.posterior_mean_coef1, t)
         posterior_mean_coef2_t = self._get_tensor_values(self.posterior_mean_coef2, t)
-        posterior_mean = posterior_mean_coef1_t * x_0_clamped_norm + posterior_mean_coef2_t * x_t_norm
+        # *** 使用未经钳位的 x_0_pred_norm ***
+        posterior_mean = posterior_mean_coef1_t * x_0_pred_norm + posterior_mean_coef2_t * x_t_norm
 
         # 7. 添加噪声 (采样)
         posterior_variance_t = self._get_tensor_values(self.posterior_variance, t)
         noise = torch.randn_like(x_t_norm)
-
-        # 避免在 t=0 时添加噪声
-        nonzero_mask = (t != 0).float().view(-1, *([1] * (len(x_t_norm.shape) - 1)))  # (B, 1, 1, 1)
+        nonzero_mask = (t != 0).float().view(-1, *([1] * (len(x_t_norm.shape) - 1)))
 
         # 返回归一化的 x_{t-1}_norm
         return posterior_mean + nonzero_mask * torch.sqrt(posterior_variance_t) * noise
 
-    # --- 采样函数 (sample) ---
+    # --- (核心修正!) 采样函数 (sample, 在末尾钳位) ---
     @torch.no_grad()
     def sample(self, num_samples, guidance_fn=None, guidance_scale=1.0):
         """
-        (修正后版本) 完整的采样循环.
-        返回: *未归一化* 的 Numpy 数组列表 [(H, W, 4), ...]
+        (修正后版本!) 完整的采样循环.
+        **在采样结束后** 进行反归一化和钳位.
+        返回: *钳位后* 且 *未归一化* 的 Numpy 数组列表 [(H, W, 4), ...]
         """
         print(f"开始采样 {num_samples} 个新机构 (格式: [exists, a, alpha, d])...")
-        device = next(self.parameters()).device  # 获取模型所在的设备
+        device = next(self.parameters()).device
 
         # 1. 从纯噪声 x_T 开始 (归一化空间)
         shape = (num_samples, self.in_channels, self.img_size, self.img_size)
         x_t_norm = torch.randn(shape, device=device)
 
-        # 2. 从 T 循环到 1
+        # 2. 从 T 循环到 1 (使用修正后的 p_sample, 无中间钳位)
         for t_index in tqdm(reversed(range(0, self.num_timesteps)), desc="DDPM 采样", total=self.num_timesteps):
             t = torch.full((num_samples,), t_index, device=device, dtype=torch.long)
-            # p_sample 输入输出都是归一化的
             x_t_norm = self.p_sample(x_t_norm, t, t_index, guidance_fn, guidance_scale)
 
-        # 3. x_0_norm 就是最终的 x_t_norm
+        # 3. x_0_norm 就是最终的 x_t_norm (仍然在 [-1, 1] 范围)
         x_0_norm = x_t_norm
 
-        # 4. 反归一化
-        x_0_unnorm = self._unnormalize(x_0_norm)
+        # --- 4. (核心!) 在采样结束后进行【一次性】反归一化和钳位 ---
+        # 4a. 反归一化
+        x_0_unnorm = self._unnormalize(x_0_norm) # (B, 4, H, W), 物理范围 (近似)
+
+        # 4b. 分离通道
+        exists_unnorm, a_unnorm, alpha_unnorm, d_unnorm = torch.chunk(x_0_unnorm, 4, dim=1)
+
+        # 4c. 钳位 exists 通道 (阈值 0.5)
+        print(exists_unnorm)
+        exists_clamped = (exists_unnorm > 0.5).float() # 变为 0.0 或 1.0
+        print(exists_clamped)
+
+        # 4d. 钳位 a, alpha, d 通道
+        a_clamped = torch.clamp(a_unnorm, min=0.0)
+        alpha_clamped = torch.clamp(alpha_unnorm, min=0.0, max=math.pi / 2.0)
+        d_clamped = torch.clamp(d_unnorm, min=0.0)
+
+        # 4e. 如果 exists=0, 强制 a,alpha,d 为 0
+        a_clamped = a_clamped * exists_clamped
+        alpha_clamped = alpha_clamped * exists_clamped
+        d_clamped = d_clamped * exists_clamped
+
+        # 4f. 重新组合通道 (最终的、钳位后的、未归一化的结果)
+        x_0_final_unnorm = torch.cat([exists_clamped, a_clamped, alpha_clamped, d_clamped], dim=1)
 
         # 5. 转换 (B, C, H, W) -> (B, H, W, C) 并移到 CPU
-        x_0_numpy = x_0_unnorm.permute(0, 2, 3, 1).cpu().numpy()
+        x_0_numpy = x_0_final_unnorm.permute(0, 2, 3, 1).cpu().numpy()
 
         # 6. 分割成列表
         generated_mechanisms = [x_0_numpy[i] for i in range(num_samples)]
 
-        print(f"采样完成. 共生成 {len(generated_mechanisms)} 个机构张量。")
-        return generated_mechanisms  # 返回未归一化的 (H, W, 4) Numpy 数组列表
+        print(f"采样完成. 共生成 {len(generated_mechanisms)} 个机构张量 (已应用最终钳位)。")
+        return generated_mechanisms # 返回钳位后、未归一化的 (H, W, 4) Numpy 数组列表

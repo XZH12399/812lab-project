@@ -30,6 +30,7 @@ class TrainingPipeline:
         self.diffusion_model = DiffusionModel(config).to(self.device) # 传递整个 config
 
         # --- (新!) 加载检查点 (如果指定) ---
+        self.checkpoint_loaded = False  # 标记是否成功加载了检查点
         load_path = config['training'].get('load_checkpoint_path')
         if load_path and load_path.lower() != 'null':
             checkpoint_path = os.path.join(project_root, load_path)  # 构建绝对路径
@@ -41,6 +42,7 @@ class TrainingPipeline:
                     checkpoint = torch.load(checkpoint_path, map_location=self.device)
                     # 严格模式(strict=True)确保加载的键与模型完全匹配
                     self.diffusion_model.load_state_dict(checkpoint['model_state_dict'], strict=True)
+                    self.checkpoint_loaded = True
                     print("--- DiT 模型权重加载成功 ---")
                 except Exception as e:
                     print(f"[警告] 加载检查点失败: {e}")
@@ -338,10 +340,87 @@ class TrainingPipeline:
             if (epoch + 1) % 10 == 0 or epoch == num_epochs - 1:
                 print(f"  DiT Epoch [{epoch + 1:03d}/{num_epochs:03d}] | MSE Loss: {avg_loss:.6f}")
 
+    def _warmup_dit(self, num_epochs):
+        """
+        DiT 预热训练: 在主循环之前, 先在初始数据集上预训练 DiT 模型.
+        这样可以确保第一次生成时 DiT 已经学会了基本的机构结构.
+        """
+        print("\n" + "="*60)
+        print(f"--- DiT 预热阶段: 在初始数据集上训练 {num_epochs} 轮 ---")
+        print("="*60)
+
+        # 加载初始数据集 (不包含增强数据集)
+        initial_manifest_path = self.config['data']['initial_manifest_path']
+        warmup_dataloader = dataloader.get_dataloader(
+            initial_manifest_path,
+            None,  # 预热阶段不使用增强数据集
+            self.config['training']['batch_size'],
+            shuffle=True
+        )
+
+        if warmup_dataloader is None or len(warmup_dataloader.dataset) == 0:
+            print("[警告] 初始数据集为空, 跳过预热阶段。")
+            return
+
+        print(f"初始数据集大小: {len(warmup_dataloader.dataset)} 个机构")
+
+        # 设置为训练模式
+        self.diffusion_model.train()
+
+        # 训练循环
+        for epoch in range(num_epochs):
+            total_loss = 0.0
+
+            for x_start in warmup_dataloader:
+                x_start = x_start.to(self.device)
+                batch_size = x_start.size(0)
+
+                self.dit_optimizer.zero_grad()
+
+                # 随机采样时间步
+                t = torch.randint(0, self.diffusion_model.num_timesteps, (batch_size,), device=self.device).long()
+
+                # 生成噪声和加噪样本
+                noise = torch.randn_like(x_start)
+                x_t_norm = self.diffusion_model.q_sample(x_start, t, noise)
+
+                # 预测噪声
+                predicted_noise_norm = self.diffusion_model(x_t_norm, t)
+
+                # 计算损失
+                loss = F.mse_loss(predicted_noise_norm, noise)
+
+                loss.backward()
+                self.dit_optimizer.step()
+
+                total_loss += loss.item()
+
+            avg_loss = total_loss / len(warmup_dataloader)
+
+            # 每10轮或最后一轮打印一次
+            if (epoch + 1) % 10 == 0 or epoch == num_epochs - 1:
+                print(f"  预热 Epoch [{epoch + 1:03d}/{num_epochs:03d}] | MSE Loss: {avg_loss:.6f}")
+
+        print("\n--- DiT 预热完成! 模型已学习初始数据集的基本结构 ---")
+        print("="*60 + "\n")
+
     def run(self):
         """
         执行完整的三步循环：生成 -> 训练RL -> 训练DiT
         """
+        # --- (新增!) DiT 预热阶段 ---
+        # 如果没有加载预训练模型, 则先在初始数据集上预热 DiT
+        warmup_epochs = self.config['training'].get('dit_warmup_epochs', 0)
+
+        if warmup_epochs > 0 and not self.checkpoint_loaded:
+            print("\n[检测到] DiT 使用随机初始化权重, 将进行预热训练...")
+            self._warmup_dit(warmup_epochs)
+        elif warmup_epochs > 0 and self.checkpoint_loaded:
+            print("\n[跳过预热] DiT 已从检查点加载, 无需预热。")
+        else:
+            print("\n[跳过预热] 配置文件中 dit_warmup_epochs=0, 不进行预热。")
+
+        # --- 主训练循环 ---
         num_cycles = self.config['training']['num_cycles']
         print(f"\n--- 开始总共 {num_cycles} 轮的训练循环 ---")
 

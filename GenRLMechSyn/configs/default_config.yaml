@@ -17,21 +17,29 @@ data:
 
 # --- 训练参数 ---
 training:
-  num_cycles: 50        # 总共进行多少轮“生成-增强”循环
-  epochs_per_cycle: 100 # 每个循环中, 扩散模型训练多少个 epoch
-  batch_size: 16        # DiT 模型显存占用较大, 建议从 16 开始
+  # --- DiT 预热阶段 ---
+  dit_warmup_epochs: 150    # DiT 预热训练轮次 (仅在随机初始化时执行)
+                             # 对于小数据集(10个样本), 建议 100-200 轮
+                             # 设为 0 则跳过预热
+
+  # --- 主循环参数 ---
+  num_cycles: 30            # 总共进行多少轮"生成-增强"循环 (小数据集减少循环次数)
+  epochs_per_cycle: 50      # 每个循环中, 扩散模型训练多少个 epoch (小数据集减少训练轮次)
+  batch_size: 8             # 数据集小, 批次大小改为 8 (避免过拟合)
   learning_rate: 0.0001
   rl_learning_rate: 0.00001
-  device: "cuda"        # 如果有NVIDIA GPU, 使用 "cuda", 否则使用 "cpu"
+  device: "cuda"            # 如果有NVIDIA GPU, 使用 "cuda", 否则使用 "cpu"
+
+  replay_buffer_limit: 10000  # Replay Buffer 最大容量
 
   # --- 模型保存与加载 ---
   save_checkpoint_path: "checkpoints/dit_model.pth" # 保存权重到这个文件
-  load_checkpoint_path: "checkpoints/dit_model.pth" # 默认不加载 (设为 "checkpoints/dit_model.pth" 来加载)
+  load_checkpoint_path: null # 默认不加载 (设为 "checkpoints/dit_model.pth" 来加载)
 
   enable_rl_guidance: true   # true: RLAgent 会引导 DiT 采样
-    # false: 纯 DiT 采样 (guidance_fn = None)
+                             # false: 纯 DiT 采样 (guidance_fn = None)
   enable_augmentation: true  # true: 高分机构会被保存到 augmented_dataset
-  # false: 数据集不会被扩充
+                             # false: 数据集不会被扩充
 
 # --- 模型参数 (DiT) ---
 diffusion_model:
@@ -51,7 +59,7 @@ diffusion_model:
 
 # --- 生成与评估 ---
 generation:
-  num_to_generate: 100 # 每个循环生成多少个新机构
+  num_to_generate: 50   # 每个循环生成多少个新机构 (小数据集减少生成数量)
   acceptance_threshold: 0.7 # 评估分数高于此阈值的机构才会被接受
   rl_guidance_scale: 1.0  # (如果 rl_guidance=true, 此缩放才生效)
 
