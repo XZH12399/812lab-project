@@ -36,7 +36,7 @@ class RLAgent(nn.Module):
 
         self.img_size = dit_config.get("img_size", 30)
         self.patch_size = dit_config.get("patch_size", 5)
-        self.in_channels = dit_config.get("in_channels", 3)
+        self.in_channels = dit_config.get("in_channels", 4)
         self.embed_dim = dit_config.get("embed_dim", 768)
 
         # 我们使用一个 "更浅" 的 DiT 作为我们的奖励模型

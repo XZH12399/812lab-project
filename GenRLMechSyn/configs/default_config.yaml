@@ -57,11 +57,17 @@ diffusion_model:
   timesteps: 1000
   schedule_type: "cosine" # 推荐 'cosine', 备选 'linear'
 
+  # --- 添加类别数量 ---
+  num_classes: 1 # 目前只有一个类别 "bennett"
+
 # --- 生成与评估 ---
 generation:
   num_to_generate: 50   # 每个循环生成多少个新机构 (小数据集减少生成数量)
   acceptance_threshold: 0.7 # 评估分数高于此阈值的机构才会被接受
   rl_guidance_scale: 1.0  # (如果 rl_guidance=true, 此缩放才生效)
+
+  # --- (可选) 指定生成时使用的类别索引 ---
+  target_label_index: 0 # 对应 "bennett"
 
 # --- 评估器配置 (动态奖励函数) ---
 evaluator_config:

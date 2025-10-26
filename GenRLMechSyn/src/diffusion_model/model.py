@@ -58,6 +58,8 @@ class DiffusionModel(nn.Module):
     它包含了神经网络架构和扩散/采样逻辑.
     使用 4 通道输入: [exists, a, alpha, d].
     (钳位操作移至 sample 函数末尾)
+    (已更新!) DiT 模型, 支持类别条件 (Class Conditioning).
+    条件 c = t_embed + y_embed.
     """
     def __init__(self, config):
         """
@@ -80,6 +82,10 @@ class DiffusionModel(nn.Module):
         self.depth = model_config.get("depth", 12)
         self.num_heads = model_config.get("num_heads", 12)
 
+        # --- 读取类别数量 ---
+        self.num_classes = model_config.get("num_classes", 1)
+        if self.num_classes <= 0: raise ValueError("num_classes 必须大于 0")
+
         # --- 存储归一化值 ---
         try:
             # 确保从 data_config 读取
@@ -94,6 +100,11 @@ class DiffusionModel(nn.Module):
         self.num_patches = (self.img_size // self.patch_size) ** 2
 
         self.time_embed = TimestepEmbed(self.embed_dim)
+
+        # --- 添加类别嵌入层 ---
+        self.label_embed = nn.Embedding(self.num_classes, self.embed_dim)
+        # (可选) 初始化嵌入层权重
+        nn.init.normal_(self.label_embed.weight, std=0.02)
 
         self.patch_embed = PatchEmbed(
             img_size=self.img_size,
@@ -203,16 +214,30 @@ class DiffusionModel(nn.Module):
 
         return torch.cat([exists_unnorm, other_unnorm], dim=1)
 
-    # --- 核心: 前向传播 (DiT 去噪网络) ---
-    def forward(self, x_norm, t):
+    # --- 前向传播 (接收标签 y) ---
+    def forward(self, x_norm, t, y):
         """
-        接收 *归一化* 的 x_t_norm (B, 4, H, W) 和 t, 预测 *归一化* 的噪声.
+        (已更新!) 接收 *归一化* 的 x_t_norm (B, 4, H, W), t (B,), 和标签 y (B,),
+        预测 *归一化* 的噪声.
         """
-        c = self.time_embed(t)
+        # 1. 时间嵌入
+        t_embed = self.time_embed(t)  # (B, D)
+
+        # 2. --- (新!) 类别嵌入 ---
+        y_embed = self.label_embed(y)  # (B, D)
+
+        # 3. --- (新!) 合并条件 ---
+        c = t_embed + y_embed  # (B, D) (简单相加)
+
+        # 4. Patch 嵌入 + 位置编码 (不变)
         x = self.patch_embed(x_norm)
         x = self.pos_embed(x)
+
+        # 5. Transformer 核心 (传入合并后的 c)
         for block in self.blocks:
-            x = block(x, c)
+            x = block(x, c)  # <-- 使用合并的 c
+
+        # 6. 解码 (不变)
         x = self.final_norm(x)
         x = self.final_linear(x)
         noise_pred_norm = self._unpatchify(x)
@@ -259,11 +284,11 @@ class DiffusionModel(nn.Module):
         x_0_pred_norm = sqrt_recip_alphas_cumprod_t * (x_t_norm - sqrt_one_minus_alphas_cumprod_t * noise_norm)
         return x_0_pred_norm
 
-    # --- (核心修正!) 反向去噪 (p_sample, 无中间钳位) ---
-    def p_sample(self, x_t_norm, t, t_index, guidance_fn=None, guidance_scale=1.0):
+    # --- 反向去噪 (p_sample, 无中间钳位) ---
+    def p_sample(self, x_t_norm, t, t_index, y, guidance_fn=None, guidance_scale=1.0):
         """
-        (修正后版本!) 反向去噪一步, 支持RL引导, 但 **不进行中间钳位**.
-        输入: 归一化的 x_t_norm
+        (已更新!) 反向去噪一步, 支持RL引导, **接收标签 y**.
+        输入: 归一化的 x_t_norm, t, y
         输出: 归一化的 x_{t-1}_norm
         """
         # 1. 获取扩散参数
@@ -271,8 +296,8 @@ class DiffusionModel(nn.Module):
         sqrt_one_minus_alphas_cumprod_t = self._get_tensor_values(self.sqrt_one_minus_alphas_cumprod, t)
         sqrt_recip_alphas_t = self._get_tensor_values(self.sqrt_recip_alphas, t)
 
-        # 2. 预测归一化的噪声 (DiT 的意见)
-        predicted_noise_norm = self.forward(x_t_norm, t)
+        # 2. --- 预测噪声 (传入 y) ---
+        predicted_noise_norm = self.forward(x_t_norm, t, y)  # <-- 传入
 
         # 3. (可选) RL 引导 (RL Agent 的意见)
         if guidance_fn is not None:
@@ -300,12 +325,12 @@ class DiffusionModel(nn.Module):
         # 返回归一化的 x_{t-1}_norm
         return posterior_mean + nonzero_mask * torch.sqrt(posterior_variance_t) * noise
 
-    # --- (核心修正!) 采样函数 (sample, 在末尾钳位) ---
+    # --- 采样函数 (sample, 在末尾钳位) ---
     @torch.no_grad()
-    def sample(self, num_samples, guidance_fn=None, guidance_scale=1.0):
+    def sample(self, num_samples, y, guidance_fn=None, guidance_scale=1.0):
         """
-        (修正后版本!) 完整的采样循环.
-        **在采样结束后** 进行反归一化和钳位.
+        (已更新!) 完整的采样循环. **接收标签 y**.
+        在采样结束后进行反归一化和钳位.
         返回: *钳位后* 且 *未归一化* 的 Numpy 数组列表 [(H, W, 4), ...]
         """
         print(f"开始采样 {num_samples} 个新机构 (格式: [exists, a, alpha, d])...")
@@ -315,10 +340,11 @@ class DiffusionModel(nn.Module):
         shape = (num_samples, self.in_channels, self.img_size, self.img_size)
         x_t_norm = torch.randn(shape, device=device)
 
-        # 2. 从 T 循环到 1 (使用修正后的 p_sample, 无中间钳位)
+        # 2. 从 T 循环到 1 (传入 y)
         for t_index in tqdm(reversed(range(0, self.num_timesteps)), desc="DDPM 采样", total=self.num_timesteps):
             t = torch.full((num_samples,), t_index, device=device, dtype=torch.long)
-            x_t_norm = self.p_sample(x_t_norm, t, t_index, guidance_fn, guidance_scale)
+            # --- (核心修改!) 调用 p_sample 时传入 y ---
+            x_t_norm = self.p_sample(x_t_norm, t, t_index, y, guidance_fn, guidance_scale)
 
         # 3. x_0_norm 就是最终的 x_t_norm (仍然在 [-1, 1] 范围)
         x_0_norm = x_t_norm
@@ -331,9 +357,7 @@ class DiffusionModel(nn.Module):
         exists_unnorm, a_unnorm, alpha_unnorm, d_unnorm = torch.chunk(x_0_unnorm, 4, dim=1)
 
         # 4c. 钳位 exists 通道 (阈值 0.5)
-        print(exists_unnorm)
         exists_clamped = (exists_unnorm > 0.5).float() # 变为 0.0 或 1.0
-        print(exists_clamped)
 
         # 4d. 钳位 a, alpha, d 通道
         a_clamped = torch.clamp(a_unnorm, min=0.0)

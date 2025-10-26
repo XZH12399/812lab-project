@@ -9,7 +9,6 @@ class MechanismEvaluator:
         self.config = config
         self.max_nodes = config['data']['max_nodes']
         self.adjacency_threshold = 0.1
-        self.top_k_nodes = 4
 
         # --- (新!) 加载动态指标配置 ---
         try:

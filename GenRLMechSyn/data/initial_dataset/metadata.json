@@ -1,92 +1,1002 @@
 [
-  {
-    "id": "bennett_001",
-    "data_path": "bennett_001.npz",
-    "metadata": {
-      "source": "initial",
-      "name": "Bennett Mechanism (Set 1)",
-      "description": "Spatial: a=10/14.14, alpha=0.785/0.524"
+    {
+        "id": "bennett_001",
+        "data_path": "Bennett_001.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (001)",
+            "label": "bennett",
+            "params": "a=4.31/6.77, alpha=0.621/1.154"
+        }
+    },
+    {
+        "id": "bennett_002",
+        "data_path": "Bennett_002.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (002)",
+            "label": "bennett",
+            "params": "a=16.60/19.52, alpha=0.855/1.091"
+        }
+    },
+    {
+        "id": "bennett_003",
+        "data_path": "Bennett_003.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (003)",
+            "label": "bennett",
+            "params": "a=4.89/6.23, alpha=0.175/0.223"
+        }
+    },
+    {
+        "id": "bennett_004",
+        "data_path": "Bennett_004.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (004)",
+            "label": "bennett",
+            "params": "a=18.94/18.02, alpha=1.237/1.118"
+        }
+    },
+    {
+        "id": "bennett_005",
+        "data_path": "Bennett_005.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (005)",
+            "label": "bennett",
+            "params": "a=15.34/4.11, alpha=1.017/0.230"
+        }
+    },
+    {
+        "id": "bennett_006",
+        "data_path": "Bennett_006.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (006)",
+            "label": "bennett",
+            "params": "a=2.95/4.83, alpha=0.294/0.496"
+        }
+    },
+    {
+        "id": "bennett_007",
+        "data_path": "Bennett_007.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (007)",
+            "label": "bennett",
+            "params": "a=5.27/3.17, alpha=1.289/0.616"
+        }
+    },
+    {
+        "id": "bennett_008",
+        "data_path": "Bennett_008.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (008)",
+            "label": "bennett",
+            "params": "a=2.79/14.27, alpha=0.116/0.632"
+        }
+    },
+    {
+        "id": "bennett_009",
+        "data_path": "Bennett_009.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (009)",
+            "label": "bennett",
+            "params": "a=11.42/10.53, alpha=0.666/0.606"
+        }
+    },
+    {
+        "id": "bennett_010",
+        "data_path": "Bennett_010.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (010)",
+            "label": "bennett",
+            "params": "a=14.96/17.49, alpha=0.632/0.763"
+        }
+    },
+    {
+        "id": "bennett_011",
+        "data_path": "Bennett_011.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (011)",
+            "label": "bennett",
+            "params": "a=12.10/9.77, alpha=0.884/0.674"
+        }
+    },
+    {
+        "id": "bennett_012",
+        "data_path": "Bennett_012.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (012)",
+            "label": "bennett",
+            "params": "a=5.50/2.01, alpha=0.803/0.266"
+        }
+    },
+    {
+        "id": "bennett_013",
+        "data_path": "Bennett_013.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (013)",
+            "label": "bennett",
+            "params": "a=11.93/5.41, alpha=0.719/0.303"
+        }
+    },
+    {
+        "id": "bennett_014",
+        "data_path": "Bennett_014.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (014)",
+            "label": "bennett",
+            "params": "a=2.76/5.46, alpha=0.444/1.014"
+        }
+    },
+    {
+        "id": "bennett_015",
+        "data_path": "Bennett_015.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (015)",
+            "label": "bennett",
+            "params": "a=7.82/1.77, alpha=1.257/0.218"
+        }
+    },
+    {
+        "id": "bennett_016",
+        "data_path": "Bennett_016.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (016)",
+            "label": "bennett",
+            "params": "a=12.43/5.29, alpha=0.894/0.338"
+        }
+    },
+    {
+        "id": "bennett_017",
+        "data_path": "Bennett_017.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (017)",
+            "label": "bennett",
+            "params": "a=7.03/7.76, alpha=1.000/1.194"
+        }
+    },
+    {
+        "id": "bennett_018",
+        "data_path": "Bennett_018.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (018)",
+            "label": "bennett",
+            "params": "a=19.24/17.62, alpha=1.019/0.895"
+        }
+    },
+    {
+        "id": "bennett_019",
+        "data_path": "Bennett_019.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (019)",
+            "label": "bennett",
+            "params": "a=3.19/2.48, alpha=1.270/0.837"
+        }
+    },
+    {
+        "id": "bennett_020",
+        "data_path": "Bennett_020.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (020)",
+            "label": "bennett",
+            "params": "a=10.19/13.59, alpha=0.722/1.080"
+        }
+    },
+    {
+        "id": "bennett_021",
+        "data_path": "Bennett_021.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (021)",
+            "label": "bennett",
+            "params": "a=19.99/13.61, alpha=1.151/0.671"
+        }
+    },
+    {
+        "id": "bennett_022",
+        "data_path": "Bennett_022.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (022)",
+            "label": "bennett",
+            "params": "a=18.28/18.08, alpha=1.005/0.989"
+        }
+    },
+    {
+        "id": "bennett_023",
+        "data_path": "Bennett_023.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (023)",
+            "label": "bennett",
+            "params": "a=4.50/3.23, alpha=0.952/0.625"
+        }
+    },
+    {
+        "id": "bennett_024",
+        "data_path": "Bennett_024.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (024)",
+            "label": "bennett",
+            "params": "a=10.67/7.71, alpha=0.575/0.404"
+        }
+    },
+    {
+        "id": "bennett_025",
+        "data_path": "Bennett_025.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (025)",
+            "label": "bennett",
+            "params": "a=8.24/2.91, alpha=1.246/0.341"
+        }
+    },
+    {
+        "id": "bennett_026",
+        "data_path": "Bennett_026.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (026)",
+            "label": "bennett",
+            "params": "a=14.51/6.51, alpha=0.234/0.104"
+        }
+    },
+    {
+        "id": "bennett_027",
+        "data_path": "Bennett_027.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (027)",
+            "label": "bennett",
+            "params": "a=2.31/3.65, alpha=0.323/0.527"
+        }
+    },
+    {
+        "id": "bennett_028",
+        "data_path": "Bennett_028.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (028)",
+            "label": "bennett",
+            "params": "a=5.78/8.98, alpha=0.603/1.076"
+        }
+    },
+    {
+        "id": "bennett_029",
+        "data_path": "Bennett_029.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (029)",
+            "label": "bennett",
+            "params": "a=19.47/14.17, alpha=1.070/0.692"
+        }
+    },
+    {
+        "id": "bennett_030",
+        "data_path": "Bennett_030.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (030)",
+            "label": "bennett",
+            "params": "a=13.73/13.78, alpha=0.897/0.902"
+        }
+    },
+    {
+        "id": "bennett_031",
+        "data_path": "Bennett_031.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (031)",
+            "label": "bennett",
+            "params": "a=7.84/11.32, alpha=0.335/0.495"
+        }
+    },
+    {
+        "id": "bennett_032",
+        "data_path": "Bennett_032.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (032)",
+            "label": "bennett",
+            "params": "a=9.44/9.08, alpha=1.212/1.122"
+        }
+    },
+    {
+        "id": "bennett_033",
+        "data_path": "Bennett_033.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (033)",
+            "label": "bennett",
+            "params": "a=19.96/17.31, alpha=1.395/1.024"
+        }
+    },
+    {
+        "id": "bennett_034",
+        "data_path": "Bennett_034.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (034)",
+            "label": "bennett",
+            "params": "a=15.18/9.56, alpha=0.593/0.360"
+        }
+    },
+    {
+        "id": "bennett_035",
+        "data_path": "Bennett_035.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (035)",
+            "label": "bennett",
+            "params": "a=8.50/3.88, alpha=0.812/0.338"
+        }
+    },
+    {
+        "id": "bennett_036",
+        "data_path": "Bennett_036.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (036)",
+            "label": "bennett",
+            "params": "a=8.01/18.14, alpha=0.302/0.739"
+        }
+    },
+    {
+        "id": "bennett_037",
+        "data_path": "Bennett_037.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (037)",
+            "label": "bennett",
+            "params": "a=5.50/5.07, alpha=1.329/1.110"
+        }
+    },
+    {
+        "id": "bennett_038",
+        "data_path": "Bennett_038.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (038)",
+            "label": "bennett",
+            "params": "a=6.43/6.34, alpha=0.816/0.801"
+        }
+    },
+    {
+        "id": "bennett_039",
+        "data_path": "Bennett_039.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (039)",
+            "label": "bennett",
+            "params": "a=12.21/4.22, alpha=1.299/0.340"
+        }
+    },
+    {
+        "id": "bennett_040",
+        "data_path": "Bennett_040.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (040)",
+            "label": "bennett",
+            "params": "a=17.67/4.40, alpha=0.704/0.162"
+        }
+    },
+    {
+        "id": "bennett_041",
+        "data_path": "Bennett_041.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (041)",
+            "label": "bennett",
+            "params": "a=14.51/4.48, alpha=1.278/0.300"
+        }
+    },
+    {
+        "id": "bennett_042",
+        "data_path": "Bennett_042.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (042)",
+            "label": "bennett",
+            "params": "a=18.55/12.50, alpha=0.844/0.528"
+        }
+    },
+    {
+        "id": "bennett_043",
+        "data_path": "Bennett_043.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (043)",
+            "label": "bennett",
+            "params": "a=5.31/3.98, alpha=1.058/0.713"
+        }
+    },
+    {
+        "id": "bennett_044",
+        "data_path": "Bennett_044.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (044)",
+            "label": "bennett",
+            "params": "a=8.91/8.72, alpha=0.979/0.949"
+        }
+    },
+    {
+        "id": "bennett_045",
+        "data_path": "Bennett_045.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (045)",
+            "label": "bennett",
+            "params": "a=17.85/13.92, alpha=1.439/0.884"
+        }
+    },
+    {
+        "id": "bennett_046",
+        "data_path": "Bennett_046.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (046)",
+            "label": "bennett",
+            "params": "a=13.73/2.24, alpha=0.924/0.130"
+        }
+    },
+    {
+        "id": "bennett_047",
+        "data_path": "Bennett_047.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (047)",
+            "label": "bennett",
+            "params": "a=6.24/3.34, alpha=1.151/0.511"
+        }
+    },
+    {
+        "id": "bennett_048",
+        "data_path": "Bennett_048.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (048)",
+            "label": "bennett",
+            "params": "a=4.62/3.85, alpha=1.455/0.977"
+        }
+    },
+    {
+        "id": "bennett_049",
+        "data_path": "Bennett_049.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (049)",
+            "label": "bennett",
+            "params": "a=4.47/2.42, alpha=0.545/0.284"
+        }
+    },
+    {
+        "id": "bennett_050",
+        "data_path": "Bennett_050.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (050)",
+            "label": "bennett",
+            "params": "a=1.32/1.53, alpha=0.949/1.220"
+        }
+    },
+    {
+        "id": "bennett_051",
+        "data_path": "Bennett_051.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (051)",
+            "label": "bennett",
+            "params": "a=9.76/11.01, alpha=1.030/1.314"
+        }
+    },
+    {
+        "id": "bennett_052",
+        "data_path": "Bennett_052.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (052)",
+            "label": "bennett",
+            "params": "a=7.92/5.35, alpha=1.417/0.731"
+        }
+    },
+    {
+        "id": "bennett_053",
+        "data_path": "Bennett_053.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (053)",
+            "label": "bennett",
+            "params": "a=15.87/16.67, alpha=1.209/1.384"
+        }
+    },
+    {
+        "id": "bennett_054",
+        "data_path": "Bennett_054.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (054)",
+            "label": "bennett",
+            "params": "a=10.38/19.39, alpha=0.372/0.746"
+        }
+    },
+    {
+        "id": "bennett_055",
+        "data_path": "Bennett_055.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (055)",
+            "label": "bennett",
+            "params": "a=18.23/13.66, alpha=1.378/0.827"
+        }
+    },
+    {
+        "id": "bennett_056",
+        "data_path": "Bennett_056.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (056)",
+            "label": "bennett",
+            "params": "a=11.36/7.37, alpha=1.171/0.641"
+        }
+    },
+    {
+        "id": "bennett_057",
+        "data_path": "Bennett_057.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (057)",
+            "label": "bennett",
+            "params": "a=12.93/11.99, alpha=0.788/0.718"
+        }
+    },
+    {
+        "id": "bennett_058",
+        "data_path": "Bennett_058.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (058)",
+            "label": "bennett",
+            "params": "a=13.17/4.06, alpha=0.608/0.177"
+        }
+    },
+    {
+        "id": "bennett_059",
+        "data_path": "Bennett_059.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (059)",
+            "label": "bennett",
+            "params": "a=2.65/3.26, alpha=0.531/0.671"
+        }
+    },
+    {
+        "id": "bennett_060",
+        "data_path": "Bennett_060.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (060)",
+            "label": "bennett",
+            "params": "a=9.51/9.61, alpha=0.740/0.750"
+        }
+    },
+    {
+        "id": "bennett_061",
+        "data_path": "Bennett_061.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (061)",
+            "label": "bennett",
+            "params": "a=1.26/1.22, alpha=1.451/1.313"
+        }
+    },
+    {
+        "id": "bennett_062",
+        "data_path": "Bennett_062.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (062)",
+            "label": "bennett",
+            "params": "a=17.70/8.52, alpha=1.178/0.461"
+        }
+    },
+    {
+        "id": "bennett_063",
+        "data_path": "Bennett_063.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (063)",
+            "label": "bennett",
+            "params": "a=17.07/11.03, alpha=1.372/0.686"
+        }
+    },
+    {
+        "id": "bennett_064",
+        "data_path": "Bennett_064.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (064)",
+            "label": "bennett",
+            "params": "a=1.81/1.88, alpha=0.960/1.016"
+        }
+    },
+    {
+        "id": "bennett_065",
+        "data_path": "Bennett_065.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (065)",
+            "label": "bennett",
+            "params": "a=19.36/6.39, alpha=1.139/0.304"
+        }
+    },
+    {
+        "id": "bennett_066",
+        "data_path": "Bennett_066.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (066)",
+            "label": "bennett",
+            "params": "a=7.12/16.23, alpha=0.420/1.193"
+        }
+    },
+    {
+        "id": "bennett_067",
+        "data_path": "Bennett_067.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (067)",
+            "label": "bennett",
+            "params": "a=9.64/15.93, alpha=0.313/0.534"
+        }
+    },
+    {
+        "id": "bennett_068",
+        "data_path": "Bennett_068.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (068)",
+            "label": "bennett",
+            "params": "a=8.83/2.26, alpha=1.304/0.249"
+        }
+    },
+    {
+        "id": "bennett_069",
+        "data_path": "Bennett_069.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (069)",
+            "label": "bennett",
+            "params": "a=1.90/2.87, alpha=0.399/0.627"
+        }
+    },
+    {
+        "id": "bennett_070",
+        "data_path": "Bennett_070.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (070)",
+            "label": "bennett",
+            "params": "a=18.02/9.47, alpha=1.275/0.527"
+        }
+    },
+    {
+        "id": "bennett_071",
+        "data_path": "Bennett_071.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (071)",
+            "label": "bennett",
+            "params": "a=5.97/1.03, alpha=0.845/0.129"
+        }
+    },
+    {
+        "id": "bennett_072",
+        "data_path": "Bennett_072.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (072)",
+            "label": "bennett",
+            "params": "a=1.35/1.09, alpha=0.283/0.227"
+        }
+    },
+    {
+        "id": "bennett_073",
+        "data_path": "Bennett_073.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (073)",
+            "label": "bennett",
+            "params": "a=5.14/13.71, alpha=0.342/1.109"
+        }
+    },
+    {
+        "id": "bennett_074",
+        "data_path": "Bennett_074.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (074)",
+            "label": "bennett",
+            "params": "a=19.05/3.09, alpha=1.302/0.157"
+        }
+    },
+    {
+        "id": "bennett_075",
+        "data_path": "Bennett_075.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (075)",
+            "label": "bennett",
+            "params": "a=2.19/1.51, alpha=0.648/0.427"
+        }
+    },
+    {
+        "id": "bennett_076",
+        "data_path": "Bennett_076.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (076)",
+            "label": "bennett",
+            "params": "a=15.07/16.77, alpha=0.479/0.539"
+        }
+    },
+    {
+        "id": "bennett_077",
+        "data_path": "Bennett_077.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (077)",
+            "label": "bennett",
+            "params": "a=14.10/15.97, alpha=0.390/0.446"
+        }
+    },
+    {
+        "id": "bennett_078",
+        "data_path": "Bennett_078.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (078)",
+            "label": "bennett",
+            "params": "a=1.79/5.48, alpha=0.262/0.916"
+        }
+    },
+    {
+        "id": "bennett_079",
+        "data_path": "Bennett_079.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (079)",
+            "label": "bennett",
+            "params": "a=5.75/5.81, alpha=0.951/0.967"
+        }
+    },
+    {
+        "id": "bennett_080",
+        "data_path": "Bennett_080.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (080)",
+            "label": "bennett",
+            "params": "a=10.33/9.13, alpha=0.975/0.822"
+        }
+    },
+    {
+        "id": "bennett_081",
+        "data_path": "Bennett_081.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (081)",
+            "label": "bennett",
+            "params": "a=7.90/8.07, alpha=1.144/1.192"
+        }
+    },
+    {
+        "id": "bennett_082",
+        "data_path": "Bennett_082.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (082)",
+            "label": "bennett",
+            "params": "a=5.05/16.83, alpha=0.194/0.697"
+        }
+    },
+    {
+        "id": "bennett_083",
+        "data_path": "Bennett_083.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (083)",
+            "label": "bennett",
+            "params": "a=13.55/13.56, alpha=1.248/1.252"
+        }
+    },
+    {
+        "id": "bennett_084",
+        "data_path": "Bennett_084.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (084)",
+            "label": "bennett",
+            "params": "a=18.70/4.75, alpha=1.316/0.248"
+        }
+    },
+    {
+        "id": "bennett_085",
+        "data_path": "Bennett_085.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (085)",
+            "label": "bennett",
+            "params": "a=12.65/7.18, alpha=1.431/0.597"
+        }
+    },
+    {
+        "id": "bennett_086",
+        "data_path": "Bennett_086.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (086)",
+            "label": "bennett",
+            "params": "a=7.44/12.71, alpha=0.614/1.398"
+        }
+    },
+    {
+        "id": "bennett_087",
+        "data_path": "Bennett_087.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (087)",
+            "label": "bennett",
+            "params": "a=12.06/17.07, alpha=0.580/0.888"
+        }
+    },
+    {
+        "id": "bennett_088",
+        "data_path": "Bennett_088.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (088)",
+            "label": "bennett",
+            "params": "a=5.88/1.17, alpha=0.577/0.109"
+        }
+    },
+    {
+        "id": "bennett_089",
+        "data_path": "Bennett_089.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (089)",
+            "label": "bennett",
+            "params": "a=3.93/3.28, alpha=1.341/0.948"
+        }
+    },
+    {
+        "id": "bennett_090",
+        "data_path": "Bennett_090.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (090)",
+            "label": "bennett",
+            "params": "a=12.82/14.86, alpha=0.270/0.315"
+        }
+    },
+    {
+        "id": "bennett_091",
+        "data_path": "Bennett_091.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (091)",
+            "label": "bennett",
+            "params": "a=15.86/16.44, alpha=0.768/0.804"
+        }
+    },
+    {
+        "id": "bennett_092",
+        "data_path": "Bennett_092.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (092)",
+            "label": "bennett",
+            "params": "a=7.49/16.61, alpha=0.456/1.357"
+        }
+    },
+    {
+        "id": "bennett_093",
+        "data_path": "Bennett_093.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (093)",
+            "label": "bennett",
+            "params": "a=10.20/18.50, alpha=0.328/0.625"
+        }
+    },
+    {
+        "id": "bennett_094",
+        "data_path": "Bennett_094.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (094)",
+            "label": "bennett",
+            "params": "a=4.86/3.10, alpha=1.031/0.579"
+        }
+    },
+    {
+        "id": "bennett_095",
+        "data_path": "Bennett_095.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (095)",
+            "label": "bennett",
+            "params": "a=13.78/13.64, alpha=0.353/0.349"
+        }
+    },
+    {
+        "id": "bennett_096",
+        "data_path": "Bennett_096.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (096)",
+            "label": "bennett",
+            "params": "a=7.00/11.30, alpha=0.637/1.287"
+        }
+    },
+    {
+        "id": "bennett_097",
+        "data_path": "Bennett_097.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (097)",
+            "label": "bennett",
+            "params": "a=2.15/9.08, alpha=0.237/1.423"
+        }
+    },
+    {
+        "id": "bennett_098",
+        "data_path": "Bennett_098.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (098)",
+            "label": "bennett",
+            "params": "a=15.74/14.80, alpha=0.777/0.720"
+        }
+    },
+    {
+        "id": "bennett_099",
+        "data_path": "Bennett_099.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (099)",
+            "label": "bennett",
+            "params": "a=10.00/17.48, alpha=0.516/1.040"
+        }
+    },
+    {
+        "id": "bennett_100",
+        "data_path": "Bennett_100.npz",
+        "metadata": {
+            "source": "initial_random",
+            "name": "Random Bennett Mechanism (100)",
+            "label": "bennett",
+            "params": "a=12.79/19.22, alpha=0.408/0.639"
+        }
     }
-  },
-  {
-    "id": "bennett_002",
-    "data_path": "bennett_002.npz",
-    "metadata": {
-      "source": "initial",
-      "name": "Bennett Mechanism (Set 2)",
-      "description": "Spatial: a=8/14.05, alpha=1.0/0.5"
-    }
-  },
-  {
-    "id": "bennett_003",
-    "data_path": "bennett_003.npz",
-    "metadata": {
-      "source": "initial",
-      "name": "Bennett Mechanism (Set 3)",
-      "description": "Spatial: a=24.74/15, alpha=0.6/1.2"
-    }
-  },
-  {
-    "id": "bennett_004",
-    "data_path": "bennett_004.npz",
-    "metadata": {
-      "source": "initial",
-      "name": "Planar 4-Bar Mechanism (Set 1)",
-      "description": "Planar: a=7/9, alpha=0.0"
-    }
-  },
-  {
-    "id": "bennett_005",
-    "data_path": "bennett_005.npz",
-    "metadata": {
-      "source": "initial",
-      "name": "Planar 4-Bar Mechanism (Set 2)",
-      "description": "Planar: a=12/5, alpha=0.0"
-    }
-  },
-  {
-    "id": "bennett_006",
-    "data_path": "bennett_006.npz",
-    "metadata": {
-      "source": "initial",
-      "name": "Bennett Mechanism (Set 4)",
-      "description": "Spatial: a=12/7.6, alpha=1.1/0.6"
-    }
-  },
-  {
-    "id": "bennett_007",
-    "data_path": "bennett_007.npz",
-    "metadata": {
-      "source": "initial",
-      "name": "Bennett Mechanism (Set 5)",
-      "description": "Spatial: a=5/10.06, alpha=0.4/0.9"
-    }
-  },
-  {
-    "id": "bennett_008",
-    "data_path": "bennett_008.npz",
-    "metadata": {
-      "source": "initial",
-      "name": "Bennett Mechanism (Set 6)",
-      "description": "Spatial: a=20/29.74, alpha=0.2/0.3"
-    }
-  },
-  {
-    "id": "bennett_009",
-    "data_path": "bennett_009.npz",
-    "metadata": {
-      "source": "initial",
-      "name": "Planar 4-Bar Mechanism (Set 3)",
-      "description": "Planar: a=15/10, alpha=0.0"
-    }
-  },
-  {
-    "id": "bennett_010",
-    "data_path": "bennett_010.npz",
-    "metadata": {
-      "source": "initial",
-      "name": "Planar 4-Bar Mechanism (Set 4)",
-      "description": "Planar: a=4/16, alpha=0.0"
-    }
-  }
 ]
