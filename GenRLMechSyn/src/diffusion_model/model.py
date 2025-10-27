@@ -366,9 +366,7 @@ class DiffusionModel(nn.Module):
         exists_unnorm, a_unnorm, alpha_unnorm, d_unnorm = torch.chunk(x_0_unnorm, 4, dim=1)
 
         # 4c. 钳位 exists 通道 (阈值 0.5)
-        print(exists_unnorm)
         exists_clamped = (exists_unnorm > 0.5).float() # 变为 0.0 或 1.0
-        print(exists_clamped)
 
         # 4d. 钳位 a, alpha, d 通道
         a_clamped = torch.clamp(a_unnorm, min=0.0)
