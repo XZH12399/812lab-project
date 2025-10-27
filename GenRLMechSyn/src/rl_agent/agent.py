@@ -137,7 +137,7 @@ class RLAgent(nn.Module):
         # 1. 准备数据
         if not experiences:
             print("Replay Buffer 为空, 跳过 RL 训练。")
-            return
+            return None
 
         # experiences 已经是 (tensor_norm, score)
         x_0_norm_tensors = [exp[0].to(device) for exp in experiences]
@@ -183,3 +183,5 @@ class RLAgent(nn.Module):
 
         avg_loss = total_loss / (len(loader) * 5)
         print(f"--- RL Agent 训练完成. 平均 Loss: {avg_loss:.6f} ---")
+
+        return avg_loss

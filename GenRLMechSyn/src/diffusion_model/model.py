@@ -5,6 +5,7 @@ import torch.nn as nn
 from einops import rearrange
 from tqdm import tqdm
 import math
+import logging
 
 # 导入我们创建的 "零件"
 try:
@@ -68,6 +69,9 @@ class DiffusionModel(nn.Module):
         """
         super().__init__()
 
+        # --- 获取 Logger ---
+        self.logger = logging.getLogger()  # 获取根 logger (已在 train.py 中配置)
+
         # --- 读取配置 ---
         model_config = config.get('diffusion_model', {})  # 添加默认空字典防止 KeyErrors
         data_config = config.get('data', {})
@@ -91,7 +95,7 @@ class DiffusionModel(nn.Module):
             # 确保从 data_config 读取
             self.norm_value = data_config['normalization_value']
         except KeyError:
-            print("[警告] 配置文件中缺少 data.normalization_value, 将使用默认值 10.0")
+            self.logger.warning("[警告] 配置文件中缺少 data.normalization_value, 将使用默认值 10.0")
             self.norm_value = 10.0
 
         # --- 组装 DiT 架构 ---
@@ -160,10 +164,10 @@ class DiffusionModel(nn.Module):
         posterior_mean_coef2_init = (1. - self.alphas_cumprod_prev) * torch.sqrt(alphas) / (1. - self.alphas_cumprod)
         self.register_buffer('posterior_mean_coef2', posterior_mean_coef2_init)
 
-        print(f"DiffusionTransformer (DiT) 模型已初始化 (输入通道: {self.in_channels}):")
-        print(f"  Embed Dim: {self.embed_dim}, Depth: {self.depth}, Heads: {self.num_heads}")
-        print(f"  Image: {self.img_size}x{self.img_size}, Patch: {self.patch_size}, Patches: {self.num_patches}")
-        print(f"  Normalization value: {self.norm_value}")
+        self.logger.info(f"DiffusionTransformer (DiT) 模型已初始化 (输入通道: {self.in_channels}):")
+        self.logger.info(f"  Embed Dim: {self.embed_dim}, Depth: {self.depth}, Heads: {self.num_heads}")
+        self.logger.info(f"  Image: {self.img_size}x{self.img_size}, Patch: {self.patch_size}, Patches: {self.num_patches}")
+        self.logger.info(f"  Normalization value: {self.norm_value}")
 
     # --- Unpatchify 辅助函数 ---
     def _unpatchify(self, x):
@@ -309,7 +313,12 @@ class DiffusionModel(nn.Module):
         #    *** 使用可能被引导过的噪声 ***
         x_0_pred_norm = self._x0_from_noise(x_t_norm, t, predicted_noise_norm)
 
-        # --- 5. (已移除!) 不再进行中间钳位 ---
+        # --- 5. (!!!) 添加钳位 (Clamp) (!!!) ---
+        #    这是修复不稳定的关键步骤。
+        #    我们将估算的 x_0 强制限制在 [-1, 1] 范围内。
+        x_0_pred_norm = torch.clamp(x_0_pred_norm, -1.0, 1.0)  # 仅对异常数据进行处理
+        # (可选)把所有数据强制归一化到[-1,1]，但是会扭曲数据
+        # x_0_pred_norm = torch.tanh(x_0_pred_norm)
 
         # --- 6. 使用【原始预测】的 x_0_pred_norm 计算 x_{t-1} 的均值 ---
         posterior_mean_coef1_t = self._get_tensor_values(self.posterior_mean_coef1, t)
@@ -333,7 +342,7 @@ class DiffusionModel(nn.Module):
         在采样结束后进行反归一化和钳位.
         返回: *钳位后* 且 *未归一化* 的 Numpy 数组列表 [(H, W, 4), ...]
         """
-        print(f"开始采样 {num_samples} 个新机构 (格式: [exists, a, alpha, d])...")
+        self.logger.info(f"开始采样 {num_samples} 个新机构 (格式: [exists, a, alpha, d])...")
         device = next(self.parameters()).device
 
         # 1. 从纯噪声 x_T 开始 (归一化空间)
@@ -349,7 +358,7 @@ class DiffusionModel(nn.Module):
         # 3. x_0_norm 就是最终的 x_t_norm (仍然在 [-1, 1] 范围)
         x_0_norm = x_t_norm
 
-        # --- 4. (核心!) 在采样结束后进行【一次性】反归一化和钳位 ---
+        # --- 4. 在采样结束后进行【一次性】反归一化和钳位 ---
         # 4a. 反归一化
         x_0_unnorm = self._unnormalize(x_0_norm) # (B, 4, H, W), 物理范围 (近似)
 
@@ -357,7 +366,9 @@ class DiffusionModel(nn.Module):
         exists_unnorm, a_unnorm, alpha_unnorm, d_unnorm = torch.chunk(x_0_unnorm, 4, dim=1)
 
         # 4c. 钳位 exists 通道 (阈值 0.5)
+        print(exists_unnorm)
         exists_clamped = (exists_unnorm > 0.5).float() # 变为 0.0 或 1.0
+        print(exists_clamped)
 
         # 4d. 钳位 a, alpha, d 通道
         a_clamped = torch.clamp(a_unnorm, min=0.0)
@@ -378,5 +389,5 @@ class DiffusionModel(nn.Module):
         # 6. 分割成列表
         generated_mechanisms = [x_0_numpy[i] for i in range(num_samples)]
 
-        print(f"采样完成. 共生成 {len(generated_mechanisms)} 个机构张量 (已应用最终钳位)。")
+        self.logger.info(f"采样完成. 共生成 {len(generated_mechanisms)} 个机构张量 (已应用最终钳位)。")
         return generated_mechanisms # 返回钳位后、未归一化的 (H, W, 4) Numpy 数组列表

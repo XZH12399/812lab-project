@@ -7,18 +7,18 @@ timestamp: "20251023"
 data:
   initial_manifest_path: "data/initial_dataset/metadata.json"
   augmented_manifest_path: "data/augmented_dataset/metadata.json"
-  max_nodes: 6 # 用于张量填充, 必须与 diffusion_model.img_size 一致
+  max_nodes: 30 # 用于张量填充, 必须与 diffusion_model.img_size 一致
   
   # 全局归一化缩放值
   # 扩散模型在 [-1, 1] 范围内工作效果最好
   # 我们假设机构参数 (a, alpha, d) 的大致最大值为 10.0
   # x_norm = (x / normalization_value) * 2.0 - 1.0
-  normalization_value: 10.0 
+  normalization_value: 10.0
 
 # --- 训练参数 ---
 training:
   # --- DiT 预热阶段 ---
-  dit_warmup_epochs: 150    # DiT 预热训练轮次 (仅在随机初始化时执行)
+  dit_warmup_epochs: 50    # DiT 预热训练轮次 (仅在随机初始化时执行)
                              # 对于小数据集(10个样本), 建议 100-200 轮
                              # 设为 0 则跳过预热
 
@@ -36,7 +36,7 @@ training:
   save_checkpoint_path: "checkpoints/dit_model.pth" # 保存权重到这个文件
   load_checkpoint_path: null # 默认不加载 (设为 "checkpoints/dit_model.pth" 来加载)
 
-  enable_rl_guidance: true   # true: RLAgent 会引导 DiT 采样
+  enable_rl_guidance: false   # true: RLAgent 会引导 DiT 采样
                              # false: 纯 DiT 采样 (guidance_fn = None)
   enable_augmentation: false  # true: 高分机构会被保存到 augmented_dataset
                              # false: 数据集不会被扩充
@@ -46,8 +46,8 @@ training:
 # --- 模型参数 (DiT) ---
 diffusion_model:
   # 数据/Patch 形状
-  img_size: 6       # 必须与 data.max_nodes 一致
-  patch_size: 2      # 30 % 5 == 0
+  img_size: 30       # 必须与 data.max_nodes 一致
+  patch_size: 5      # 30 % 5 == 0
   in_channels: 4     # 新: [exists, a, alpha, d]
   
   # Transformer 架构

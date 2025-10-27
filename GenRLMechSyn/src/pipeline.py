@@ -2,6 +2,8 @@
 
 import os
 import json
+import logging
+import time
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -16,6 +18,9 @@ from .rl_agent.agent import RLAgent  # 现在这是一个 nn.Module
 
 class TrainingPipeline:
     def __init__(self, config, project_root):
+        # --- 获取 Logger ---
+        self.logger = logging.getLogger()  # 获取根 logger (已在 train.py 中配置)
+        
         self.config = config
         self.project_root = project_root
 
@@ -27,7 +32,7 @@ class TrainingPipeline:
         self.guidance_scale = config['generation'].get('rl_guidance_scale', 1.0)
 
         # --- 3. 初始化所有模块 ---
-        print("--- 正在初始化所有模块... ---")
+        self.logger.info("--- 正在初始化所有模块... ---")
         self.diffusion_model = DiffusionModel(config).to(self.device)  # 传递整个 config
 
         # --- 加载检查点 (如果指定) ---
@@ -37,22 +42,22 @@ class TrainingPipeline:
             checkpoint_path = os.path.join(project_root, load_path)  # 构建绝对路径
             if os.path.exists(checkpoint_path):
                 try:
-                    print(f"--- 正在从检查点加载 DiT 模型权重 ---")
-                    print(f"路径: {checkpoint_path}")
+                    self.logger.info(f"--- 正在从检查点加载 DiT 模型权重 ---")
+                    self.logger.info(f"路径: {checkpoint_path}")
                     # 加载 state_dict (只加载权重)
                     checkpoint = torch.load(checkpoint_path, map_location=self.device)
                     # 严格模式(strict=True)确保加载的键与模型完全匹配
                     self.diffusion_model.load_state_dict(checkpoint['model_state_dict'], strict=True)
                     self.checkpoint_loaded = True
-                    print("--- DiT 模型权重加载成功 ---")
+                    self.logger.info("--- DiT 模型权重加载成功 ---")
                 except Exception as e:
-                    print(f"[警告] 加载检查点失败: {e}")
-                    print("将使用随机初始化的权重。")
+                    self.logger.warning(f"[警告] 加载检查点失败: {e}")
+                    self.logger.warning("将使用随机初始化的权重。")
             else:
-                print(f"[警告] 指定的检查点文件不存在: {checkpoint_path}")
-                print("将使用随机初始化的权重。")
+                self.logger.warning(f"[警告] 指定的检查点文件不存在: {checkpoint_path}")
+                self.logger.warning("将使用随机初始化的权重。")
         else:
-            print("--- 未指定加载检查点, DiT 模型使用随机初始化权重 ---")
+            self.logger.info("--- 未指定加载检查点, DiT 模型使用随机初始化权重 ---")
 
         self.evaluator = MechanismEvaluator(config)  # 传递整个 config
         self.rl_agent = RLAgent(config).to(self.device)  # 传递整个 config
@@ -78,19 +83,19 @@ class TrainingPipeline:
         # --- 6. 初始化经验库 (Replay Buffer) ---
         self.replay_buffer = self.load_replay_buffer()
 
-        print("--- 训练流程已准备就绪 ---")
-        print(f"  RL 引导: {self.enable_rl_guidance}")
-        print(f"  数据增强: {self.enable_augmentation}")
+        self.logger.info("--- 训练流程已准备就绪 ---")
+        self.logger.info(f"  RL 引导: {self.enable_rl_guidance}")
+        self.logger.info(f"  数据增强: {self.enable_augmentation}")
         if self.enable_augmentation:
-            print(f"  增强阈值 (分数 >=): {self.acceptance_threshold}")
+            self.logger.info(f"  增强阈值 (分数 >=): {self.acceptance_threshold}")
 
     def _setup_device(self):
         """设置训练设备 (GPU 或 CPU)"""
         if self.config['training'].get('device', 'cpu') == 'cuda' and torch.cuda.is_available():
-            print("训练将在 NVIDIA CUDA GPU 上运行。")
+            self.logger.info("训练将在 NVIDIA CUDA GPU 上运行。")
             return torch.device("cuda")
         else:
-            print("训练将在 CPU 上运行。")
+            self.logger.info("训练将在 CPU 上运行。")
             return torch.device("cpu")
 
     # --- 归一化/反归一化 辅助函数 ---
@@ -138,35 +143,35 @@ class TrainingPipeline:
             checkpoint_path = os.path.join(self.project_root, load_path_rel)
             if os.path.exists(checkpoint_path):
                 try:
-                    print(f"--- 正在从检查点加载 DiT 模型权重: {checkpoint_path} ---")
+                    self.logger.info(f"--- 正在从检查点加载 DiT 模型权重: {checkpoint_path} ---")
                     checkpoint = torch.load(checkpoint_path, map_location=self.device)
                     # 尝试加载模型状态, 忽略不匹配的键 (例如 label_embed 可能不存在于旧检查点)
                     missing_keys, unexpected_keys = self.diffusion_model.load_state_dict(
                         checkpoint['model_state_dict'], strict=False)
                     if missing_keys:
-                        print(f"[警告] 加载检查点时缺少键: {missing_keys}")
+                        self.logger.warning(f"[警告] 加载检查点时缺少键: {missing_keys}")
                     if unexpected_keys:
-                        print(f"[警告] 加载检查点时有多余键: {unexpected_keys}")
-                    print("--- DiT 模型权重加载完成 ---")
+                        self.logger.warning(f"[警告] 加载检查点时有多余键: {unexpected_keys}")
+                    self.logger.info("--- DiT 模型权重加载完成 ---")
                 except Exception as e:
-                    print(f"[警告] 加载检查点失败: {e}. 将使用随机初始化的权重。")
+                    self.logger.warning(f"[警告] 加载检查点失败: {e}. 将使用随机初始化的权重。")
             else:
-                print(f"[警告] 检查点文件不存在: {checkpoint_path}. 将使用随机初始化的权重。")
+                self.logger.warning(f"[警告] 检查点文件不存在: {checkpoint_path}. 将使用随机初始化的权重。")
         else:
-            print("--- 未指定加载检查点, DiT 模型使用随机初始化权重 ---")
+            self.logger.info("--- 未指定加载检查点, DiT 模型使用随机初始化权重 ---")
 
     def load_replay_buffer(self):  # (已更新, 读取标签并归一化)
-        print("正在加载 Replay Buffer (来自 augmented_dataset)...")
+        self.logger.info("正在加载 Replay Buffer (来自 augmented_dataset)...")
         manifest_path = os.path.join(self.project_root, self.config['data']['augmented_manifest_path'])  # 使用绝对路径
         data_dir = os.path.dirname(manifest_path)
         if not os.path.exists(manifest_path):
-            print("信息: augmented_manifest.json 不存在, Replay Buffer 为空。")
+            self.logger.info("信息: augmented_manifest.json 不存在, Replay Buffer 为空。")
             return []
         try:
             with open(manifest_path, 'r', encoding='utf-8') as f:
                 manifest = json.load(f)
         except Exception as e:
-            print(f"错误: 读取 manifest {manifest_path} 失败: {e}")
+            self.logger.error(f"错误: 读取 manifest {manifest_path} 失败: {e}")
             return []
         experiences = []
         label_map = {"bennett": 0}  # 保持简单
@@ -176,11 +181,11 @@ class TrainingPipeline:
                 # --- (新!) 检查标签 ---
                 label_str = entry.get('metadata', {}).get('label')
                 if label_str is None:
-                    print(f"警告: 条目 {entry['id']} 缺少标签, 跳过。")
+                    self.logger.warning(f"警告: 条目 {entry['id']} 缺少标签, 跳过。")
                     continue
                 label_idx = label_map.get(label_str, -1)
                 if label_idx == -1:
-                    print(f"警告: 条目 {entry['id']} 标签 '{label_str}' 未知, 跳过。")
+                    self.logger.warning(f"警告: 条目 {entry['id']} 标签 '{label_str}' 未知, 跳过。")
                     continue
 
                 with np.load(npz_path) as data:
@@ -191,37 +196,43 @@ class TrainingPipeline:
                     # 存储 (归一化张量, 分数, 标签索引)
                     experiences.append((tensor_norm, score, torch.tensor(label_idx, dtype=torch.long)))
             except Exception as e:
-                print(f"警告: 无法加载 Replay Buffer 条目 {npz_path}. 原因: {e}")
-        print(f"Replay Buffer 加载完成. 共 {len(experiences)} 个历史经验。")
+                self.logger.warning(f"警告: 无法加载 Replay Buffer 条目 {npz_path}. 原因: {e}")
+        self.logger.info(f"Replay Buffer 加载完成. 共 {len(experiences)} 个历史经验。")
         return experiences
 
-    def _generate_and_augment(self, cycle_num):  # (已更新, 传递 target_label)
-        print("\n--- 步骤 1 & 2: 生成, 评估, 扩充 ---")
+    def _generate_and_augment(self, cycle_num):
+        """
+        (已修正!) 步骤 1 & 2: 生成 (带引导), 评估, 并扩充数据集.
+        返回: 新的经验 [(tensor_NORMALIZED, score, label_idx), ...], 用于训练 RL Agent.
+        """
+        self.logger.info("--- 步骤 1 & 2: 生成, 评估, 扩充 ---")
         self.diffusion_model.eval()
         self.rl_agent.eval()
+
         guidance_fn = None
         if self.enable_rl_guidance:
-            print("RL 引导已启用。")
+            self.logger.info("RL 引导已启用。")
             guidance_fn = self.rl_agent.get_guidance_fn(self.guidance_scale)
         else:
-            print("RL 引导已关闭。将使用纯 DiT 采样。")
+            self.logger.info("RL 引导已关闭。将使用纯 DiT 采样。")
 
-        # --- (新!) 准备目标标签 ---
         num_to_gen = self.config['generation']['num_to_generate']
-        # 创建一个包含 num_to_gen 个目标标签索引的张量
         target_labels = torch.full((num_to_gen,), self.target_label_index, dtype=torch.long, device=self.device)
 
-        # --- (新!) 调用 sample 时传入 target_labels ---
         new_mech_tensors_unnorm_numpy = self.diffusion_model.sample(
             num_samples=num_to_gen,
-            y=target_labels,  # <-- 传入目标标签
+            y=target_labels,
             guidance_fn=guidance_fn,
             guidance_scale=self.guidance_scale
         )
 
-        print(f"评估 {len(new_mech_tensors_unnorm_numpy)} 个新生成的机构...")
+        self.logger.info(f"评估 {len(new_mech_tensors_unnorm_numpy)} 个新生成的机构...")
         new_experiences_for_rl = []
         good_mechanisms_to_save = []
+
+        # --- (新!) 添加分数达标计数器 ---
+        num_satisfying_score = 0
+
         current_target_label_str = "bennett"  # TODO: 从索引反查
 
         for tensor_unnorm_numpy in new_mech_tensors_unnorm_numpy:
@@ -229,76 +240,99 @@ class TrainingPipeline:
             tensor_torch_unnorm = torch.from_numpy(np.transpose(tensor_unnorm_numpy, (2, 0, 1))).float()
             tensor_torch_norm = self._normalize(tensor_torch_unnorm)
 
-            # --- (新!) 经验中包含标签索引 ---
+            # 添加经验给 RL (无论分数如何)
             new_experiences_for_rl.append(
                 (tensor_torch_norm.to(self.device), score, torch.tensor(self.target_label_index, dtype=torch.long)))
 
-            if self.enable_augmentation and score >= self.acceptance_threshold:
-                # --- (新!) 保存时也包含标签 ---
-                new_entry = {
-                    "tensor": tensor_unnorm_numpy,
-                    "metadata": {
-                        "source": "generated", "generation_cycle": cycle_num + 1,
-                        "score": score, "label": current_target_label_str  # <-- 保存标签字符串
-                    }}
-                good_mechanisms_to_save.append(new_entry)
+            # --- 检查分数是否达标 ---
+            if score >= self.acceptance_threshold:
+                num_satisfying_score += 1  # 无论是否增强，只要分数达标就计数
 
-        print(f"评估完成. {len(good_mechanisms_to_save)} / {len(new_mech_tensors_unnorm_numpy)} 个机构满足保存要求...")
+                # --- 只有当增强启用时，才准备保存 ---
+                if self.enable_augmentation:
+                    new_entry = {
+                        "tensor": tensor_unnorm_numpy,
+                        "metadata": {
+                            "source": "generated", "generation_cycle": cycle_num + 1,
+                            "score": score, "label": current_target_label_str
+                        }}
+                    good_mechanisms_to_save.append(new_entry)
+
+        # --- 计算并记录平均分数 ---
+        if new_experiences_for_rl:
+            all_scores = [exp[1] for exp in new_experiences_for_rl]
+            avg_score = sum(all_scores) / len(all_scores)
+            min_score = min(all_scores)
+            max_score = max(all_scores)
+            self.logger.info(f"生成机构平均得分: {avg_score:.4f} (Min: {min_score:.4f}, Max: {max_score:.4f})")
+        else:
+            avg_score = None  # 或者 0.0
+
+        self.logger.info(f"评估完成. {num_satisfying_score} / {len(new_mech_tensors_unnorm_numpy)} 个机构满足分数要求...")
+
+        # 保存逻辑保持不变 (仍然检查 enable_augmentation 和列表是否为空)
         if self.enable_augmentation:
             if good_mechanisms_to_save:
-                print(f"数据增强已启用。正在保存 {len(good_mechanisms_to_save)} 个机构...")
+                # 打印实际保存的数量
+                self.logger.info(f"数据增强已启用。正在保存 {len(good_mechanisms_to_save)} 个机构...")
                 dataloader.add_mechanisms_to_dataset(good_mechanisms_to_save,
                                                      os.path.join(self.project_root, self.config['data'][
-                                                         'augmented_manifest_path']))  # 使用绝对路径
+                                                         'augmented_manifest_path']))
             else:
-                print("数据增强已启用, 但没有合格的机构可保存。")
+                # 即使分数达标的>0, 但由于增强开启但列表为空(理论上不会发生), 也打印此信息
+                self.logger.info("数据增强已启用, 但没有合格的机构可保存。")
         else:
-            print("数据增强已关闭。跳过保存。")
+            self.logger.info("数据增强已关闭。跳过保存。")
+
         return new_experiences_for_rl
 
     def _train_rl_agent(self, new_experiences):  # (已更新, 处理带标签的经验)
         if not self.enable_rl_guidance:
-            print("\n--- RL 引导已关闭, 跳过 RL 智能体训练 ---")
+            self.logger.info("--- RL 引导已关闭, 跳过 RL 智能体训练 ---")
             return
-        print("\n--- 步骤 3a: 训练 RL 智能体 ---")
+        self.logger.info("--- 步骤 3a: 训练 RL 智能体 ---")
         buffer_limit = self.config['training'].get('replay_buffer_limit', 50000)
         self.replay_buffer.extend(new_experiences)  # new_experiences 是 (tensor_norm, score, label_idx)
         if len(self.replay_buffer) > buffer_limit:
             self.replay_buffer = self.replay_buffer[-buffer_limit:]
-        print(f"Replay Buffer 中共有 {len(self.replay_buffer)} 个经验。")
+        self.logger.info(f"Replay Buffer 中共有 {len(self.replay_buffer)} 个经验。")
         if not self.replay_buffer:
-            print("Replay Buffer 为空, 跳过 RL 训练。")
+            self.logger.info("Replay Buffer 为空, 跳过 RL 训练。")
             return
 
-        # --- (新!) update_policy 可能需要标签, 但我们当前实现不需要 ---
+        # --- update_policy 可能需要标签, 但我们当前实现不需要 ---
         # 如果 RLAgent 的 forward 或 loss 需要标签, 需要修改 update_policy
-        self.rl_agent.update_policy(
+        avg_rl_loss = self.rl_agent.update_policy(
             self.replay_buffer,  # 包含 (归一化张量, 分数, 标签索引)
             self.diffusion_model,
             self.rl_optimizer,
             self.device
             # 如果需要, 可以传递标签信息给 update_policy
         )
+        
+        # --- 记录 RL Loss ---
+        if avg_rl_loss is not None:  # 检查是否训练成功
+            self.logger.info(f"--- RL Agent 训练完成. 平均 Loss: {avg_rl_loss:.6f} ---")
 
     def _train_dit_model(self, cycle_num):  # (已更新, 处理标签)
         initial_manifest_path = os.path.join(self.project_root, self.config['data']['initial_manifest_path'])
         augmented_manifest_path = None
         if self.enable_augmentation:
-            print("数据增强已启用。DiT 将在 [初始 + 增强] 数据集上训练。")
+            self.logger.info("数据增强已启用。DiT 将在 [初始 + 增强] 数据集上训练。")
             augmented_manifest_path = os.path.join(self.project_root, self.config['data']['augmented_manifest_path'])
         else:
-            print("数据增强已关闭。DiT 将仅在 [初始] 数据集上训练。")
+            self.logger.info("数据增强已关闭。DiT 将仅在 [初始] 数据集上训练。")
 
         current_dataloader = dataloader.get_dataloader(
             self.config,  # <-- 传递 config
             initial_manifest_path, augmented_manifest_path,
             self.config['training']['batch_size'], shuffle=True)
         if current_dataloader is None or len(current_dataloader.dataset) == 0:
-            print("错误：数据加载失败或数据集为空, 跳过 DiT 训练。")
+            self.logger.error("错误：数据加载失败或数据集为空, 跳过 DiT 训练。")
             return
 
-        print(f"\n--- 步骤 3b: 训练 DiT (模仿者) ---")
-        print(f"将使用 {len(current_dataloader.dataset)} 个机构进行训练。")
+        self.logger.info(f"--- 步骤 3b: 训练 DiT (模仿者) ---")
+        self.logger.info(f"将使用 {len(current_dataloader.dataset)} 个机构进行训练。")
         self.diffusion_model.train()
         num_epochs = self.config['training']['epochs_per_cycle']
         for epoch in range(num_epochs):
@@ -328,15 +362,13 @@ class TrainingPipeline:
 
             avg_loss = total_loss / len(current_dataloader)
             if (epoch + 1) % 10 == 0 or epoch == num_epochs - 1:
-                print(f"  DiT Epoch [{epoch + 1:03d}/{num_epochs:03d}] | MSE Loss: {avg_loss:.6f}")
+                self.logger.info(f"  DiT Epoch [{epoch + 1:03d}/{num_epochs:03d}] | MSE Loss: {avg_loss:.6f}")
 
     def _warmup_dit(self, num_epochs):
         """
         (已修正!) DiT 预热训练: 在主循环之前, 先在初始数据集上预训练 DiT 模型.
         """
-        print("\n" + "="*60)
-        print(f"--- DiT 预热阶段: 在初始数据集上训练 {num_epochs} 轮 ---")
-        print("="*60)
+        self.logger.info(f"--- DiT 预热阶段: 在初始数据集上训练 {num_epochs} 轮 ---")
 
         # 加载初始数据集 (不包含增强数据集)
         initial_manifest_path = os.path.join(self.project_root, self.config['data']['initial_manifest_path'])  # 使用绝对路径
@@ -349,10 +381,10 @@ class TrainingPipeline:
         )
 
         if warmup_dataloader is None or len(warmup_dataloader.dataset) == 0:
-            print("[警告] 初始数据集为空, 跳过预热阶段。")
+            self.logger.warning("[警告] 初始数据集为空, 跳过预热阶段。")
             return
 
-        print(f"初始数据集大小: {len(warmup_dataloader.dataset)} 个机构")
+        self.logger.info(f"初始数据集大小: {len(warmup_dataloader.dataset)} 个机构")
 
         # 设置为训练模式
         self.diffusion_model.train()
@@ -396,10 +428,9 @@ class TrainingPipeline:
 
             # 每10轮或最后一轮打印一次
             if (epoch + 1) % 10 == 0 or epoch == num_epochs - 1:
-                print(f"  预热 Epoch [{epoch + 1:03d}/{num_epochs:03d}] | MSE Loss: {avg_loss:.6f}")
+                self.logger.info(f"  预热 Epoch [{epoch + 1:03d}/{num_epochs:03d}] | MSE Loss: {avg_loss:.6f}")
 
-        print("\n--- DiT 预热完成! 模型已学习初始数据集的基本结构 ---")
-        print("="*60 + "\n")
+        self.logger.info("--- DiT 预热完成! 模型已学习初始数据集的基本结构 ---")
 
     def run(self):
         """
@@ -410,34 +441,44 @@ class TrainingPipeline:
         warmup_epochs = self.config['training'].get('dit_warmup_epochs', 0)
 
         if warmup_epochs > 0 and not self.checkpoint_loaded:
-            print("\n[检测到] DiT 使用随机初始化权重, 将进行预热训练...")
+            self.logger.info("[检测到] DiT 使用随机初始化权重, 将进行预热训练...")
             self._warmup_dit(warmup_epochs)
         elif warmup_epochs > 0 and self.checkpoint_loaded:
-            print("\n[跳过预热] DiT 已从检查点加载, 无需预热。")
+            self.logger.info("[跳过预热] DiT 已从检查点加载, 无需预热。")
         else:
-            print("\n[跳过预热] 配置文件中 dit_warmup_epochs=0, 不进行预热。")
+            self.logger.info("[跳过预热] 配置文件中 dit_warmup_epochs=0, 不进行预热。")
 
         # --- 主训练循环 ---
         num_cycles = self.config['training']['num_cycles']
-        print(f"\n--- 开始总共 {num_cycles} 轮的训练循环 ---")
+        self.logger.info(f"--- 开始总共 {num_cycles} 轮的训练循环 ---")
 
         for cycle in range(num_cycles):
-            print(f"\n===== [ 完整循环 {cycle + 1}/{num_cycles} ] =====")
+            self.logger.info(f"===== [ 完整循环 {cycle + 1}/{num_cycles} ] =====")
+            self.logger.info("\n")
 
             # 步骤 1 & 2: 生成, 评估, 扩充
             # (返回归一化的新经验)
+            start_gen_eval = time.time()
             new_experiences = self._generate_and_augment(cycle)
+            self.logger.info(f"  生成与评估耗时: {time.time() - start_gen_eval:.2f} 秒")
+            self.logger.info("\n")
 
             # 步骤 3a: 训练 RL 智能体 (如果启用)
+            start_rl_train = time.time()
             self._train_rl_agent(new_experiences)
+            self.logger.info(f"  RL 训练耗时: {time.time() - start_rl_train:.2f} 秒")
+            self.logger.info("\n")
 
             # 步骤 3b: 训练 DiT 模型
+            start_dit_train = time.time()
             self._train_dit_model(cycle)
+            self.logger.info(f"  DiT 训练耗时: {time.time() - start_dit_train:.2f} 秒")
+            self.logger.info("\n")
 
             # (可选) 在每个循环后保存模型检查点
             self.save_checkpoint(f"cycle_{cycle + 1}")
 
-        print("\n===== 所有训练循环完成! =====")
+        self.logger.info("===== 所有训练循环完成! =====")
 
         # --- (新!) 在训练结束后保存最终模型 ---
         self.save_checkpoint("final")  # 调用保存函数
@@ -447,7 +488,7 @@ class TrainingPipeline:
         """保存 DiT 模型的权重"""
         save_path_config = self.config['training'].get('save_checkpoint_path')
         if not save_path_config or save_path_config.lower() == 'null':
-            print("--- 未指定保存路径, 跳过保存检查点 ---")
+            self.logger.info("--- 未指定保存路径, 跳过保存检查点 ---")
             return
 
         # 构建文件名 (例如 checkpoints/dit_model_cycle10.pth 或 checkpoints/dit_model_final.pth)
@@ -464,8 +505,8 @@ class TrainingPipeline:
         os.makedirs(save_dir, exist_ok=True)
 
         try:
-            print(f"\n--- 正在保存 DiT 模型检查点 ---")
-            print(f"路径: {final_save_path}")
+            self.logger.info(f"--- 正在保存 DiT 模型检查点 ---")
+            self.logger.info(f"路径: {final_save_path}")
             torch.save({
                 'model_state_dict': self.diffusion_model.state_dict(),
                 # (可选) 保存优化器状态
@@ -473,6 +514,8 @@ class TrainingPipeline:
                 # (可选) 保存其他信息, 如 cycle 数
                 # 'cycle': identifier
             }, final_save_path)
-            print("--- 模型检查点保存成功 ---")
+            self.logger.info("--- 模型检查点保存成功 ---")
+            self.logger.info("\n")
         except Exception as e:
-            print(f"[错误] 保存检查点失败: {e}")
+            self.logger.error(f"[错误] 保存检查点失败: {e}")
+            self.logger.info("\n")
