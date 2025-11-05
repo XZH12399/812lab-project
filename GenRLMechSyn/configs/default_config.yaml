@@ -7,13 +7,18 @@ timestamp: "20251023"
 data:
   initial_manifest_path: "data/initial_dataset/metadata.json"
   augmented_manifest_path: "data/augmented_dataset/metadata.json"
-  max_nodes: 30 # 用于张量填充, 必须与 diffusion_model.img_size 一致
+  max_nodes: 6 # 用于张量填充, 必须与 diffusion_model.img_size 一致
   
-  # 全局归一化缩放值
+  # --- 按通道设置归一化最大值 ---
   # 扩散模型在 [-1, 1] 范围内工作效果最好
-  # 我们假设机构参数 (a, alpha, d) 的大致最大值为 10.0
-  # x_norm = (x / normalization_value) * 2.0 - 1.0
-  normalization_value: 10.0
+  # exists: 0/1   -> -1/1 (由代码硬编码)
+  # a:      [0, a_max]     -> [-1, 1]
+  # alpha:  [0, alpha_max] -> [-1, 1]
+  # d:      [0, d_max]     -> [-1, 1]
+  normalization_values:
+    a: 20.0       # 假设连杆长度 a 最大为 20.0
+    alpha: 1.5708 # (pi/2) 扭转角的物理最大值
+    d: 20.0       # 假设偏移量 d 最大为 20.0
 
 # --- 训练参数 ---
 training:
@@ -21,9 +26,13 @@ training:
   dit_warmup_epochs: 50    # DiT 预热训练轮次 (仅在随机初始化时执行)
                              # 对于小数据集(10个样本), 建议 100-200 轮
                              # 设为 0 则跳过预热
+  # --- RL 预热阶段 ---
+  rl_warmup_epochs: 50     # 在主循环前, RL Agent 在初始数据集上训练多少"轮"
+                            # (每轮会训练 5 个 epoch, 见 agent.py)
+                            # 设为 0 则跳过
 
   # --- 主循环参数 ---
-  num_cycles: 30            # 总共进行多少轮"生成-增强"循环 (小数据集减少循环次数)
+  num_cycles: 300            # 总共进行多少轮"生成-增强"循环 (小数据集减少循环次数)
   epochs_per_cycle: 50      # 每个循环中, 扩散模型训练多少个 epoch (小数据集减少训练轮次)
   batch_size: 8             # 数据集小, 批次大小改为 8 (避免过拟合)
   learning_rate: 0.0001
@@ -33,12 +42,12 @@ training:
   replay_buffer_limit: 10000  # Replay Buffer 最大容量
 
   # --- 模型保存与加载 ---
-  save_checkpoint_path: "checkpoints/dit_model.pth" # 保存权重到这个文件
-  load_checkpoint_path: null # 默认不加载 (设为 "checkpoints/dit_model.pth" 来加载)
+  save_checkpoint_path: "checkpoints/training_checkpoint.pth" # 保存权重到这个文件
+  load_checkpoint_path: "checkpoints/training_checkpoint.pth" # 默认不加载 (设为 "checkpoints/training_checkpoint.pth" 来加载)
 
-  enable_rl_guidance: false   # true: RLAgent 会引导 DiT 采样
+  enable_rl_guidance: true   # true: RLAgent 会引导 DiT 采样
                              # false: 纯 DiT 采样 (guidance_fn = None)
-  enable_augmentation: false  # true: 高分机构会被保存到 augmented_dataset
+  enable_augmentation: true  # true: 高分机构会被保存到 augmented_dataset
                              # false: 数据集不会被扩充
 
   random_seed: 42 # 添加随机数种子
@@ -46,8 +55,8 @@ training:
 # --- 模型参数 (DiT) ---
 diffusion_model:
   # 数据/Patch 形状
-  img_size: 30       # 必须与 data.max_nodes 一致
-  patch_size: 5      # 30 % 5 == 0
+  img_size: 6       # 必须与 data.max_nodes 一致
+  patch_size: 2      # 30 % 5 == 0
   in_channels: 4     # 新: [exists, a, alpha, d]
   
   # Transformer 架构
@@ -65,7 +74,7 @@ diffusion_model:
 # --- 生成与评估 ---
 generation:
   num_to_generate: 50   # 每个循环生成多少个新机构 (小数据集减少生成数量)
-  acceptance_threshold: 0.7 # 评估分数高于此阈值的机构才会被接受
+  acceptance_threshold: 0.98 # 评估分数高于此阈值的机构才会被接受
   rl_guidance_scale: 1.0  # (如果 rl_guidance=true, 此缩放才生效)
 
   # --- (可选) 指定生成时使用的类别索引 ---
@@ -80,6 +89,15 @@ evaluator_config:
   #
   # 注意: 评估器会按此列表的顺序执行。
   # 关键的 "硬约束" (如连通性) 应该放在最前面。
+
+  # --- 课程学习阶段 ---
+  # 定义每个门控检查点在总训练进度(百分比)的何时结束
+  curriculum_stages:
+    # 0% -> 30%: 只训练到 d_value_check
+    d_value_check: 0.3
+    # 30% -> 60%: 训练到 side_equality_check
+    side_equality_check: 0.6
+    # 60% -> 100%: 训练所有 (bennett_sine_law)
 
   indicators:
 
@@ -99,12 +117,17 @@ evaluator_config:
     # --- 3. 相似性偏好: 奖励 4 杆机构 ---
     # (此函数应返回 1.0 (4杆) 或 0.0 (其他))
     check_topology_similarity:
-      enable: true
+      enable: false
       weight: 1.0  # R_total += 1.0 * (1.0 or 0.0)
                    # (这就是您之前的 w_similarity)
 
     # --- 4.  添加节点数惩罚 ---
     check_node_count_penalty:
-      enable: true
+      enable: false
       weight: 1.0 # <-- 权重设为 1.0 (因为函数本身返回负值)
       # R_total += 1.0 * ( penalty )
+
+    # --- 5.  添加 Bennett 检查 ---
+    check_is_bennett:
+      enable: true   # <-- 启用
+      weight: 1.0    # <-- 给予一个额外的奖励权重

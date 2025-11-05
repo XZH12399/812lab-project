@@ -58,7 +58,7 @@ def generate_valid_bennett_params():
             sin_alpha1 = math.sin(alpha1);
             sin_alpha2 = math.sin(alpha2)
             if abs(sin_alpha1) < 1e-6 or abs(sin_alpha2) < 1e-6: continue
-            a2 = a1 * sin_alpha2 / sin_alpha1
+            a2 = a1 * sin_alpha1 / sin_alpha2
             if MIN_LINK_LENGTH <= a2 <= MAX_LINK_LENGTH: return a1, a2, alpha1, alpha2
         except (ValueError, ZeroDivisionError):
             continue

@@ -90,13 +90,22 @@ class DiffusionModel(nn.Module):
         self.num_classes = model_config.get("num_classes", 1)
         if self.num_classes <= 0: raise ValueError("num_classes 必须大于 0")
 
-        # --- 存储归一化值 ---
+        # --- 加载按通道的归一化值 ---
         try:
-            # 确保从 data_config 读取
-            self.norm_value = data_config['normalization_value']
+            norm_values_dict = data_config['normalization_values']
+            # 我们需要 [a, alpha, d] 三个通道的值
+            norm_vec = torch.tensor([
+                norm_values_dict['a'],
+                norm_values_dict['alpha'],
+                norm_values_dict['d']
+            ], dtype=torch.float32)  # shape [3]
+
+            # 注册为 buffer (1, 3, 1, 1), 以便在 _normalize 中广播
+            self.register_buffer('norm_vec', norm_vec.view(1, 3, 1, 1))
+            self.norm_value_alpha_max = norm_values_dict['alpha']  # 单独存储 alpha 最大值 (pi/2)
+
         except KeyError:
-            self.logger.warning("[警告] 配置文件中缺少 data.normalization_value, 将使用默认值 10.0")
-            self.norm_value = 10.0
+            raise ValueError("[致命错误] 配置文件中缺少 data.normalization_values 块。")
 
         # --- 组装 DiT 架构 ---
         if self.img_size % self.patch_size != 0:
@@ -167,7 +176,7 @@ class DiffusionModel(nn.Module):
         self.logger.info(f"DiffusionTransformer (DiT) 模型已初始化 (输入通道: {self.in_channels}):")
         self.logger.info(f"  Embed Dim: {self.embed_dim}, Depth: {self.depth}, Heads: {self.num_heads}")
         self.logger.info(f"  Image: {self.img_size}x{self.img_size}, Patch: {self.patch_size}, Patches: {self.num_patches}")
-        self.logger.info(f"  Normalization value: {self.norm_value}")
+        self.logger.info(f"  Normalization values (a, alpha, d): {self.norm_vec.squeeze().tolist()}")
 
     # --- Unpatchify 辅助函数 ---
     def _unpatchify(self, x):
@@ -186,35 +195,30 @@ class DiffusionModel(nn.Module):
 
     # --- 归一化/反归一化 (处理4通道) ---
     def _normalize(self, x_tensor):
-        """
-        将 (B, 4, H, W) 数据归一化到 [-1, 1] 范围.
-        通道 0 (exists): 0 -> -1, 1 -> 1
-        通道 1,2,3 (a,alpha,d): [0, norm_value] -> [-1, 1]
-        """
-        if x_tensor.shape[1] != 4:
-            raise ValueError(f"输入张量的通道数应为4, 但收到 {x_tensor.shape[1]}")
-        exists_channel = x_tensor[:, 0:1, :, :]
-        other_channels = x_tensor[:, 1:, :, :]
+        """ 将 (B, 4, H, W) 数据按通道归一化到 [-1, 1] 范围."""
+        if x_tensor.shape[1] != 4: raise ValueError(f"通道数应为4, 收到 {x_tensor.shape[1]}")
 
-        exists_norm = exists_channel * 2.0 - 1.0
-        # 防止除零, 加上一个小的 epsilon
-        other_norm = (other_channels / (self.norm_value + 1e-8)) * 2.0 - 1.0
+        exists_channel = x_tensor[:, 0:1, :, :]  # (B, 1, H, W)
+        other_channels = x_tensor[:, 1:, :, :]  # (B, 3, H, W) (a, alpha, d)
+
+        exists_norm = exists_channel * 2.0 - 1.0  # 0/1 -> -1/1
+
+        # 按通道归一化: (B, 3, H, W) / (1, 3, 1, 1)
+        other_norm = (other_channels / (self.norm_vec + 1e-8)) * 2.0 - 1.0
 
         return torch.cat([exists_norm, other_norm], dim=1)
 
     def _unnormalize(self, x_tensor_norm):
-        """
-        将 (B, 4, H, W) 数据从 [-1, 1] 恢复到原始范围.
-        通道 0 (exists): [-1, 1] -> [0, 1] (近似)
-        通道 1,2,3 (a,alpha,d): [-1, 1] -> [0, norm_value]
-        """
-        if x_tensor_norm.shape[1] != 4:
-            raise ValueError(f"输入张量的通道数应为4, 但收到 {x_tensor_norm.shape[1]}")
-        exists_norm = x_tensor_norm[:, 0:1, :, :]
-        other_norm = x_tensor_norm[:, 1:, :, :]
+        """ 将 (B, 4, H, W) 数据从 [-1, 1] 按通道恢复到原始范围."""
+        if x_tensor_norm.shape[1] != 4: raise ValueError(f"通道数应为4, 收到 {x_tensor_norm.shape[1]}")
 
-        exists_unnorm = (exists_norm + 1.0) / 2.0  # 范围 [0, 1]
-        other_unnorm = ((other_norm + 1.0) / 2.0) * self.norm_value
+        exists_norm = x_tensor_norm[:, 0:1, :, :]  # (B, 1, H, W)
+        other_norm = x_tensor_norm[:, 1:, :, :]  # (B, 3, H, W)
+
+        exists_unnorm = (exists_norm + 1.0) / 2.0  # -1/1 -> 0/1
+
+        # 按通道反归一化: (B, 3, H, W) * (1, 3, 1, 1)
+        other_unnorm = ((other_norm + 1.0) / 2.0) * self.norm_vec
 
         return torch.cat([exists_unnorm, other_unnorm], dim=1)
 
@@ -305,7 +309,7 @@ class DiffusionModel(nn.Module):
 
         # 3. (可选) RL 引导 (RL Agent 的意见)
         if guidance_fn is not None:
-            gradient = guidance_fn(x_t_norm, t)
+            gradient = guidance_fn(x_t_norm, t, y)
             # 应用引导 (与之前相同)
             predicted_noise_norm = predicted_noise_norm - sqrt_one_minus_alphas_cumprod_t * guidance_scale * gradient
 
@@ -313,12 +317,26 @@ class DiffusionModel(nn.Module):
         #    *** 使用可能被引导过的噪声 ***
         x_0_pred_norm = self._x0_from_noise(x_t_norm, t, predicted_noise_norm)
 
-        # --- 5. (!!!) 添加钳位 (Clamp) (!!!) ---
-        #    这是修复不稳定的关键步骤。
-        #    我们将估算的 x_0 强制限制在 [-1, 1] 范围内。
-        x_0_pred_norm = torch.clamp(x_0_pred_norm, -1.0, 1.0)  # 仅对异常数据进行处理
-        # (可选)把所有数据强制归一化到[-1,1]，但是会扭曲数据
-        # x_0_pred_norm = torch.tanh(x_0_pred_norm)
+        # --- 5. 应用 "动态阈值" ---
+
+        # 这是一个超参数, 0.995 是一个常用的起始值
+        dynamic_threshold_percentile = 0.995
+
+        # 5a. 获取批次中所有像素的绝对值 (B, C, H, W) -> (B*C*H*W)
+        abs_x0_flat = x_0_pred_norm.abs().view(-1)
+
+        # 5b. 找到第 P 百分位的值 (e.g., 1.3)
+        s = torch.quantile(abs_x0_flat, dynamic_threshold_percentile)
+
+        # 5c. 如果 s > 1.0 (意味着开始"溢出"), 就启用钳位, 否则不处理
+        # (我们添加一个 1e-6 防止 s=0)
+        s = torch.max(s, torch.tensor(1.0, device=s.device))
+
+        # 5d. "智能"钳位: 钳位到 [-s, s] 范围
+        x_0_pred_norm = torch.clamp(x_0_pred_norm, -s, s)
+
+        # # 5e. (可选, 但推荐) 将其"缩放"回 [-1, 1] 范围
+        # x_0_pred_norm = x_0_pred_norm / (s + 1e-6)
 
         # --- 6. 使用【原始预测】的 x_0_pred_norm 计算 x_{t-1} 的均值 ---
         posterior_mean_coef1_t = self._get_tensor_values(self.posterior_mean_coef1, t)
@@ -358,9 +376,13 @@ class DiffusionModel(nn.Module):
         # 3. x_0_norm 就是最终的 x_t_norm (仍然在 [-1, 1] 范围)
         x_0_norm = x_t_norm
 
+        # print("x_0_norm", x_0_norm)
+
         # --- 4. 在采样结束后进行【一次性】反归一化和钳位 ---
         # 4a. 反归一化
         x_0_unnorm = self._unnormalize(x_0_norm) # (B, 4, H, W), 物理范围 (近似)
+
+        # print("x_0_unnorm", x_0_unnorm)
 
         # 4b. 分离通道
         exists_unnorm, a_unnorm, alpha_unnorm, d_unnorm = torch.chunk(x_0_unnorm, 4, dim=1)
