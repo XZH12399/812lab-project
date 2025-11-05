@@ -130,8 +130,4 @@ evaluator_config:
     # --- 5.  添加 Bennett 检查 ---
     check_is_bennett:
       enable: true   # <-- 启用
-<<<<<<< HEAD
       weight: 1.0    # <-- 给予一个额外的奖励权重
-=======
-      weight: 1.0    # <-- 给予一个额外的奖励权重
->>>>>>> 110dbd94e1952c781caf68c513bb2ea3be0d83f9
