@@ -205,4 +205,8 @@ class RLAgent(nn.Module):
 
         avg_loss = total_loss / (len(loader) * 5)
         # (移除 print, 因为 pipeline 会打印)
+<<<<<<< HEAD
         return avg_loss  # <-- 返回 avg_loss
+=======
+        return avg_loss  # <-- 返回 avg_loss
+>>>>>>> 110dbd94e1952c781caf68c513bb2ea3be0d83f9

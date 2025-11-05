@@ -34,7 +34,12 @@ class TrainingPipeline:
                 norm_values_dict['a'],
                 norm_values_dict['alpha'],
                 norm_values_dict['d']
+<<<<<<< HEAD
             ], dtype=torch.float32, device=self.device)
+=======
+            ], dtype=torch.float32, device=self.device)  # shape [3]
+            # (1, 3, 1, 1), 确保在正确的设备上
+>>>>>>> 110dbd94e1952c781caf68c513bb2ea3be0d83f9
             self.norm_vec = norm_vec.view(1, 3, 1, 1)
         except KeyError:
             raise ValueError("[致命错误] 配置文件中缺少 data.normalization_values 块。")
@@ -130,7 +135,15 @@ class TrainingPipeline:
         self.enable_rl_guidance = config['training'].get('enable_rl_guidance', True)
         self.enable_augmentation = config['training'].get('enable_augmentation', True)
         self.acceptance_threshold = config['generation'].get('acceptance_threshold', -float('inf'))
+<<<<<<< HEAD
         self.rl_warmup_epochs = config['training'].get('rl_warmup_epochs', 0)
+=======
+
+        # --- 加载 RL 预热轮次 ---
+        self.rl_warmup_epochs = config['training'].get('rl_warmup_epochs', 0)
+
+        # --- 获取目标生成标签 ---
+>>>>>>> 110dbd94e1952c781caf68c513bb2ea3be0d83f9
         self.target_label_index = config['generation'].get('target_label_index', 0)
 
         # --- 7. 初始化经验库 (已移动到步骤 5) ---
@@ -633,12 +646,18 @@ class TrainingPipeline:
 
         # --- RL Agent 预热阶段 ---
         # 检查: 1. 配置中开启了预热 2. RL引导已启用 3. Replay Buffer是空的(从头开始)
+<<<<<<< HEAD
         # 仅当从 0 开始且 Replay Buffer 为空时才预热
         if self.rl_warmup_epochs > 0 and self.enable_rl_guidance and not self.replay_buffer:
             self.logger.info("[检测到] RL 引导已启用, 但 Replay Buffer 为空. 将进行 RL 预热...")
             self._warmup_rl_agent(self.rl_warmup_epochs)
         elif self.checkpoint_loaded:
             self.logger.info(f"[跳过 RL 预热] Replay Buffer 已从检查点加载 ({len(self.replay_buffer)} 个经验)。")
+=======
+        if self.rl_warmup_epochs > 0 and self.enable_rl_guidance and not self.replay_buffer:
+            self.logger.info("[检测到] RL 引导已启用, 但 Replay Buffer 为空. 将进行 RL 预热...")
+            self._warmup_rl_agent(self.rl_warmup_epochs)  # <-- 调用新函数
+>>>>>>> 110dbd94e1952c781caf68c513bb2ea3be0d83f9
         elif self.rl_warmup_epochs > 0 and self.replay_buffer:
             self.logger.info(f"[跳过 RL 预热] Replay Buffer 已包含 {len(self.replay_buffer)} 个经验, 无需预热。")
         elif self.rl_warmup_epochs > 0 and not self.enable_rl_guidance:
@@ -678,8 +697,13 @@ class TrainingPipeline:
 
         self.logger.info("===== 所有训练循环完成! =====")
 
+<<<<<<< HEAD
         # --- 保存最终模型, 标记为已完成 ---
         self.save_checkpoint(cycle_num=num_cycles)
+=======
+        # --- 在训练结束后保存最终模型 ---
+        self.save_checkpoint("final")  # 调用保存函数
+>>>>>>> 110dbd94e1952c781caf68c513bb2ea3be0d83f9
 
     # --- 添加保存检查点的函数 ---
     def save_checkpoint(self, cycle_num=0):

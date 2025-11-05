@@ -320,4 +320,8 @@ class MechanismEvaluator:
 
         except Exception as e:
             # print(f"Error during Bennett check: {e}") # 调试
+<<<<<<< HEAD
             return partial_score
+=======
+            return partial_score
+>>>>>>> 110dbd94e1952c781caf68c513bb2ea3be0d83f9
