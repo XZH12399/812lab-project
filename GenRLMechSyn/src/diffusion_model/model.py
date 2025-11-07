@@ -356,9 +356,8 @@ class DiffusionModel(nn.Module):
     @torch.no_grad()
     def sample(self, num_samples, y, guidance_fn=None, guidance_scale=1.0):
         """
-        (已更新!) 完整的采样循环. **接收标签 y**.
-        在采样结束后进行反归一化和钳位.
-        返回: *钳位后* 且 *未归一化* 的 Numpy 数组列表 [(H, W, 4), ...]
+        完整的采样循环. **接收标签 y**.
+        包含 "平移不变性" 约束 (在 4d 和 4e 之间).
         """
         self.logger.info(f"开始采样 {num_samples} 个新机构 (格式: [exists, a, alpha, d])...")
         device = next(self.parameters()).device
@@ -373,32 +372,56 @@ class DiffusionModel(nn.Module):
             # --- (核心修改!) 调用 p_sample 时传入 y ---
             x_t_norm = self.p_sample(x_t_norm, t, t_index, y, guidance_fn, guidance_scale)
 
-        # 3. x_0_norm 就是最终的 x_t_norm (仍然在 [-1, 1] 范围)
+        # 3. x_0_norm 就是最终的 x_t_norm
         x_0_norm = x_t_norm
 
-        # print("x_0_norm", x_0_norm)
-
-        # --- 4. 在采样结束后进行【一次性】反归一化和钳位 ---
+        # 4. 在采样结束后进行【一次性】反归一化和钳位
         # 4a. 反归一化
-        x_0_unnorm = self._unnormalize(x_0_norm) # (B, 4, H, W), 物理范围 (近似)
-
-        # print("x_0_unnorm", x_0_unnorm)
+        x_0_unnorm = self._unnormalize(x_0_norm)  # (B, 4, H, W)
 
         # 4b. 分离通道
         exists_unnorm, a_unnorm, alpha_unnorm, d_unnorm = torch.chunk(x_0_unnorm, 4, dim=1)
 
         # 4c. 钳位 exists 通道 (阈值 0.5)
-        exists_clamped = (exists_unnorm > 0.5).float() # 变为 0.0 或 1.0
+        exists_clamped = (exists_unnorm > 0.5).float()  # 变为 0.0 或 1.0
 
-        # 4d. 钳位 a, alpha, d 通道
+        # 4d. 钳位 a, alpha, d 通道 (物理约束)
         a_clamped = torch.clamp(a_unnorm, min=0.0)
         alpha_clamped = torch.clamp(alpha_unnorm, min=0.0, max=math.pi / 2.0)
-        d_clamped = torch.clamp(d_unnorm, min=0.0)
+        d_clamped = torch.clamp(d_unnorm, min=0.0)  # (B, 1, H, W)
+
+        # --- 步骤 4d-bis: 应用轴向平移不变性 ---
+        # (这必须在 4e 之前 执行)
+
+        # 1. 我们只关心 '存在' 的连杆。 (B, 1, H, W)
+        exists_mask = (exists_clamped > 0.5)
+
+        # 2. 我们将 '不存在' 的连杆的 d 值设为无穷大, 这样它们就不会被选为最小值
+        d_for_min_finding = d_clamped.clone()
+        d_for_min_finding[~exists_mask] = float('inf')  # ~exists_mask 是 '不存在' 的掩码
+
+        # 3. 沿轴 'i' (即 H 维度) 找到每根轴的最小偏移量
+        #    我们在 W 维度 (k) 上寻找最小值
+        #    keepdim=True 使其形状为 (B, 1, H, 1)
+        min_offsets_per_axis = torch.min(d_for_min_finding, dim=3, keepdim=True)[0]  # [0] 获取值
+
+        # 4. 处理那些没有任何连杆连接的轴 (它们的最小值是 'inf')
+        #    我们将 'inf' 替换为 0, 这样它们就不会被减去任何值
+        min_offsets_per_axis = torch.where(
+            torch.isinf(min_offsets_per_axis),
+            0.0,
+            min_offsets_per_axis
+        )
+
+        # 5. 从所有 d 值中减去其对应轴的最小值
+        #    广播: (B, 1, H, W) = (B, 1, H, W) - (B, 1, H, 1)
+        d_clamped = d_clamped - min_offsets_per_axis
+        #    (例如: [3, 4, 5] - [3] = [0, 1, 2])
 
         # 4e. 如果 exists=0, 强制 a,alpha,d 为 0
         a_clamped = a_clamped * exists_clamped
         alpha_clamped = alpha_clamped * exists_clamped
-        d_clamped = d_clamped * exists_clamped
+        d_clamped = d_clamped * exists_clamped  # (现在 d_clamped 已经被归一化, 并且不存的连杆被设为0)
 
         # 4f. 重新组合通道 (最终的、钳位后的、未归一化的结果)
         x_0_final_unnorm = torch.cat([exists_clamped, a_clamped, alpha_clamped, d_clamped], dim=1)
@@ -410,4 +433,4 @@ class DiffusionModel(nn.Module):
         generated_mechanisms = [x_0_numpy[i] for i in range(num_samples)]
 
         self.logger.info(f"采样完成. 共生成 {len(generated_mechanisms)} 个机构张量 (已应用最终钳位)。")
-        return generated_mechanisms # 返回钳位后、未归一化的 (H, W, 4) Numpy 数组列表
+        return generated_mechanisms  # 返回钳位后、未归一化的 (H, W, 4) Numpy 数组列表

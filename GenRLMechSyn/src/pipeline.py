@@ -295,7 +295,7 @@ class TrainingPipeline:
 
     def _generate_and_augment(self, cycle_num, total_cycles):
         """
-        (已修正!) 步骤 1 & 2: 生成 (带引导), 评估, 并扩充数据集.
+        步骤 1 & 2: 生成 (带引导), 评估, 并扩充数据集.
         返回: 新的经验 [(tensor_NORMALIZED, score, label_idx), ...], 用于训练 RL Agent.
         """
         self.logger.info("--- 步骤 1 & 2: 生成, 评估, 扩充 ---")
@@ -311,6 +311,13 @@ class TrainingPipeline:
 
         num_to_gen = self.config['generation']['num_to_generate']
         target_labels = torch.full((num_to_gen,), self.target_label_index, dtype=torch.long, device=self.device)
+
+        # --- 获取标签 字符串 ---
+        # (这是一个临时的反向映射, 将来你可以从 config 中读取)
+        # TODO: 从 config 动态加载
+        label_map = {0: "bennett", 1: "planar_four_bar"}
+        current_target_label_str = label_map.get(self.target_label_index, "bennett")  # 默认为 "bennett"
+        self.logger.info(f"正在生成 {num_to_gen} 个目标标签为 '{current_target_label_str}' 的机构...")
 
         new_mech_tensors_unnorm_numpy = self.diffusion_model.sample(
             num_samples=num_to_gen,
@@ -331,6 +338,7 @@ class TrainingPipeline:
         for tensor_unnorm_numpy in new_mech_tensors_unnorm_numpy:
             score = self.evaluator.evaluate(
                 tensor_unnorm_numpy,
+                target_label=current_target_label_str,
                 current_cycle=cycle_num,
                 total_cycles=total_cycles
             )

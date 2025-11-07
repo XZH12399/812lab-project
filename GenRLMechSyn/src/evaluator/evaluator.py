@@ -15,46 +15,44 @@ class MechanismEvaluator:
             self.max_nodes = 30
 
         eval_conf = config.get('evaluator_config', {})
-        self.existence_threshold = eval_conf.get('existence_threshold', 0.05)
-        self.bennett_error_threshold = eval_conf.get('bennett_error_threshold', 0.05)
-        self.top_k_nodes = eval_conf.get('top_k_nodes', 10)
-        self.target_nodes = eval_conf.get('target_nodes', 4)
-        self.node_penalty_scale = eval_conf.get('node_penalty_scale', 0.05)
 
-        # --- 加载课程阶段 ---
-        self.curriculum_stages = eval_conf.get('curriculum_stages', {})
-        if self.curriculum_stages:
-            print("--- (新) 课程学习已启用 ---")
-            print(f"  阶段 1 (d=0): 0% -> {self.curriculum_stages.get('d_value_check', 0.0) * 100}%")
-            print(f"  阶段 2 (sides): ... -> {self.curriculum_stages.get('side_equality_check', 0.0) * 100}%")
-            print(f"  阶段 3 (sine): ... -> 100%")
-
+        # --- 加载新的指标配置 ---
         try:
-            self.indicator_config = eval_conf['indicators']
+            self.common_indicator_config = eval_conf['common_indicators']
+            self.label_specific_indicator_config = eval_conf['label_specific_indicators']
         except KeyError:
-            print("[致命错误] 配置文件中未找到 'evaluator_config' 或 'indicators' 块。")
-            self.indicator_config = {}
+            print("[致命错误] 配置文件 中未找到 'common_indicators' 或 'label_specific_indicators' 块。")
+            self.common_indicator_config = {}
+            self.label_specific_indicator_config = {}
 
         print("评估模块已初始化 (使用【动态指标】系统)。")
         self._print_enabled_indicators()
 
     def _print_enabled_indicators(self):
         """辅助函数, 打印所有启用的评估指标及其权重。"""
-        print("--- 启用的评估指标 ---")
-        if not self.indicator_config:
-            print("  (无指标配置)")
-        for name, conf in self.indicator_config.items():
+        print("--- 启用的“通用”指标 ---")
+        if not self.common_indicator_config:
+            print("  (无通用指标)")
+        for name, conf in self.common_indicator_config.items():
             if conf.get('enable', False):
                 print(f"  [ON]  {name} (Weight: {conf.get('weight', 0.0)})")
-            else:
-                print(f"  [OFF] {name}")
+
+        print("--- 启用的“特定标签”指标 ---")
+        if not self.label_specific_indicator_config:
+            print("  (无特定指标)")
+        for label_name, indicators in self.label_specific_indicator_config.items():
+            print(f"  (标签: '{label_name}')")
+            for name, conf in indicators.items():
+                if conf.get('enable', False):
+                    print(f"    [ON]  {name} (Weight: {conf.get('weight', 0.0)})")
+
         print("------------------------")
 
     # --- 1. 核心评估函数 (Orchestrator) ---
-    def evaluate(self, mechanism_tensor, current_cycle=None, total_cycles=None):
+    def evaluate(self, mechanism_tensor, target_label=None, current_cycle=None, total_cycles=None):
         """
         计算总奖励 R_total.
-        动态调用指标, 并传递 G 和原始 tensor.
+        动态调用“通用”指标和“特定标签”指标.
         """
         G = self._build_graph(mechanism_tensor)
 
@@ -63,31 +61,56 @@ class MechanismEvaluator:
 
         total_reward = 0.0
 
-        for name, conf in self.indicator_config.items():
+        # --- 1. 运行“通用”指标 ---
+        for name, conf in self.common_indicator_config.items():
             if not conf.get('enable', False):
                 continue
 
+            # (调用指标函数的逻辑不变)
             try:
                 indicator_function = getattr(self, f"_{name}")
             except AttributeError:
-                print(f"警告: 配置文件中的 '{name}' 无法在 evaluator.py 中找到 '_{name}' 函数。")
+                print(f"警告: 配置文件 中的 '{name}' 无法在 evaluator.py 中找到 '_{name}' 函数。")
                 continue
-
             try:
                 score = indicator_function(
-                    G,
-                    mechanism_tensor,
-                    current_cycle=current_cycle,
-                    total_cycles=total_cycles
+                    G, mechanism_tensor,
+                    conf=conf,
+                    current_cycle=current_cycle, total_cycles=total_cycles
                 )
             except Exception as e:
                 print(f"警告: 调用指标函数 '_{name}' 时出错: {e}")
                 score = 0.0
-
             total_reward += conf.get('weight', 0.0) * score
-
-            if score <= -0.9:
+            if score <= -0.9:  # 快速失败
                 return total_reward
+
+        # --- 2. 运行“特定标签”指标 ---
+        if target_label and target_label in self.label_specific_indicator_config:
+            specific_indicators = self.label_specific_indicator_config[target_label]
+            for name, conf in specific_indicators.items():
+                if not conf.get('enable', False):
+                    continue
+
+                # (调用指标函数的逻辑不变)
+                try:
+                    indicator_function = getattr(self, f"_{name}")
+                except AttributeError:
+                    # (我们在这里假设 _check_grashof_condition 尚未实现)
+                    print(f"警告: 配置文件 中的 '{name}' 无法在 evaluator.py 中找到 '_{name}' 函数。")
+                    continue
+                try:
+                    score = indicator_function(
+                        G, mechanism_tensor,
+                        conf=conf,
+                        current_cycle=current_cycle, total_cycles=total_cycles
+                    )
+                except Exception as e:
+                    print(f"警告: 调用指标函数 '_{name}' 时出错: {e}")
+                    score = 0.0
+                total_reward += conf.get('weight', 0.0) * score
+                if score <= -0.9:  # 快速失败
+                    return total_reward
 
         return total_reward
 
@@ -176,19 +199,27 @@ class MechanismEvaluator:
                 return 1.0  # 是4杆环
         return 0.0  # 中立
 
-    def _check_node_count_penalty(self, G, tensor, **kwargs):
+    def _check_node_count_penalty(self, G, tensor, conf, **kwargs):
         """指标4: 节点数量惩罚 (偏好塑造)."""
+        # --- 从传入的 conf 中读取参数 ---
+        target_nodes = conf.get('target_nodes', 4)
+        node_penalty_scale = conf.get('node_penalty_scale', 0.05)
+
         num_nodes = G.number_of_nodes()
-        deviation = abs(num_nodes - self.target_nodes)
-        penalty = - self.node_penalty_scale * (deviation ** 2)
+        deviation = abs(num_nodes - target_nodes)
+        penalty = - node_penalty_scale * (deviation ** 2)
         return max(-1.0, penalty)
 
     # --- 指标5: Bennett 检查 (严格的序贯/门控奖励) ---
-    def _check_is_bennett(self, G, tensor, current_cycle=None, total_cycles=None, **kwargs):  # <-- (核心修改!)
+    def _check_is_bennett(self, G, tensor, conf, current_cycle=None, total_cycles=None, **kwargs):  # <-- (核心修改!)
         """
         (已修正!) 指标5: 检查机构与 Bennett 约束的接近程度 (严格序贯/门控奖励).
         (新!) 增加了基于 current_cycle 的课程学习门控.
         """
+
+        # --- 从传入的 conf 中读取参数 ---
+        existence_threshold = conf.get('existence_threshold', 0.05)
+        bennett_error_threshold = conf.get('bennett_error_threshold', 0.05)
 
         # --- 门槛 1: 拓扑 ---
         num_nodes = G.number_of_nodes()
@@ -225,12 +256,12 @@ class MechanismEvaluator:
                 d_v = tensor[v, u, 3]
                 print("d_u", d_u, "d_v", d_v)
 
-                if abs(d_u) <= self.existence_threshold:
+                if abs(d_u) <= existence_threshold:
                     partial_score += D_REWARD_PER_PARAM
                 else:
                     all_d_are_zero = False
 
-                if abs(d_v) <= self.existence_threshold:
+                if abs(d_v) <= existence_threshold:
                     partial_score += D_REWARD_PER_PARAM
                 else:
                     all_d_are_zero = False
@@ -248,13 +279,6 @@ class MechanismEvaluator:
 
             print(f"d-value check PASSED GATE. Current score: {partial_score}")
 
-            # # --- 课程学习门控 1 ---
-            # d_value_gate_end = self.curriculum_stages.get('d_value_check', 0.0)
-            # if progress_percent <= d_value_gate_end:
-            #     print(
-            #         f"Curriculum (Progress {progress_percent * 100:.0f}% <= {d_value_gate_end * 100}%): Stopping at d-value check.")
-            #     return partial_score  # 返回拓扑 + d值的奖励
-
             p1, p2, p3, p4 = ordered_params
 
             # --- 门槛 3: 对边相等 (奖励/惩罚) ---
@@ -269,28 +293,21 @@ class MechanismEvaluator:
             print("a_error_1", a_error_1, "a_error_2", a_error_2)
             print("alpha_error_1", alpha_error_1, "alpha_error_2", alpha_error_2)
 
-            all_sides_equal = (a_error_1 < self.bennett_error_threshold and
-                               a_error_2 < self.bennett_error_threshold and
-                               alpha_error_1 < self.bennett_error_threshold and
-                               alpha_error_2 < self.bennett_error_threshold)
+            all_sides_equal = (a_error_1 < bennett_error_threshold and
+                               a_error_2 < bennett_error_threshold and
+                               alpha_error_1 < bennett_error_threshold and
+                               alpha_error_2 < bennett_error_threshold)
 
             if not all_sides_equal:
-                if a_error_1 < self.bennett_error_threshold: partial_score += (A_REWARD_MAX / 2.0)
-                if a_error_2 < self.bennett_error_threshold: partial_score += (A_REWARD_MAX / 2.0)
-                if alpha_error_1 < self.bennett_error_threshold: partial_score += (ALPHA_REWARD_MAX / 2.0)
-                if alpha_error_2 < self.bennett_error_threshold: partial_score += (ALPHA_REWARD_MAX / 2.0)
+                if a_error_1 < bennett_error_threshold: partial_score += (A_REWARD_MAX / 2.0)
+                if a_error_2 < bennett_error_threshold: partial_score += (A_REWARD_MAX / 2.0)
+                if alpha_error_1 < bennett_error_threshold: partial_score += (ALPHA_REWARD_MAX / 2.0)
+                if alpha_error_2 < bennett_error_threshold: partial_score += (ALPHA_REWARD_MAX / 2.0)
                 print(f"Side equality check FAILED GATE. Final score: {partial_score}")
                 return partial_score
 
             partial_score += A_REWARD_MAX + ALPHA_REWARD_MAX
             print(f"Side-equality check PASSED GATE. Current score: {partial_score}")
-
-            # # --- 课程学习门控 2 ---
-            # side_equality_gate_end = self.curriculum_stages.get('side_equality_check', 0.0)
-            # if progress_percent <= side_equality_gate_end:
-            #     print(
-            #         f"Curriculum (Progress {progress_percent * 100:.0f}% <= {side_equality_gate_end * 100}%): Stopping at side-equality check.")
-            #     return partial_score  # 返回拓扑 + d值 + 对边相等的奖励
 
             # --- 门槛 4: Bennett 正弦法则 (0.9 -> 1.0) ---
             print("Proceeding to Bennett Sine Law check (Final Stage)...")
@@ -300,8 +317,8 @@ class MechanismEvaluator:
             a2 = p2['a']
             alpha2 = p2['alpha']
 
-            if alpha1 > self.existence_threshold and alpha2 > self.existence_threshold and \
-                    alpha1 < math.pi - self.existence_threshold and alpha2 < math.pi - self.existence_threshold:
+            if alpha1 > existence_threshold and alpha2 > existence_threshold and \
+                    alpha1 < math.pi - existence_threshold and alpha2 < math.pi - existence_threshold:
 
                 sin_alpha1 = math.sin(alpha1)
                 sin_alpha2 = math.sin(alpha2)
@@ -311,7 +328,7 @@ class MechanismEvaluator:
                 bennett_error_rel = abs(val1 - val2) / (max(abs(val1), abs(val2)) + 1e-6)
                 print("bennett_error_rel", bennett_error_rel)
 
-                if bennett_error_rel < self.bennett_error_threshold:
+                if bennett_error_rel < bennett_error_threshold:
                     partial_score += BENNETT_REWARD_MAX
 
             print("final_score:", partial_score)

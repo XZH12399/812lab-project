@@ -26,7 +26,7 @@ class MechanismDataset(Dataset):
         except KeyError as e:
             raise ValueError(f"配置文件 config.yaml 缺少必要的键: {e}")
 
-        # --- (新!) 创建标签到索引的映射 ---
+        # --- 创建标签到索引的映射 ---
         # 目前只有一个 "bennett" -> 0
         self.label_to_index = {"bennett": 0}
         # TODO: 将来可以从 config 或数据集中动态构建这个映射

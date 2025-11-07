@@ -43,11 +43,11 @@ training:
 
   # --- 模型保存与加载 ---
   save_checkpoint_path: "checkpoints/training_checkpoint.pth" # 保存权重到这个文件
-  load_checkpoint_path: "checkpoints/training_checkpoint.pth" # 默认不加载 (设为 "checkpoints/training_checkpoint.pth" 来加载)
+  load_checkpoint_path: null # 默认不加载 (设为 "checkpoints/training_checkpoint.pth" 来加载)
 
   enable_rl_guidance: true   # true: RLAgent 会引导 DiT 采样
                              # false: 纯 DiT 采样 (guidance_fn = None)
-  enable_augmentation: true  # true: 高分机构会被保存到 augmented_dataset
+  enable_augmentation: false  # true: 高分机构会被保存到 augmented_dataset
                              # false: 数据集不会被扩充
 
   random_seed: 42 # 添加随机数种子
@@ -77,7 +77,7 @@ generation:
   acceptance_threshold: 0.98 # 评估分数高于此阈值的机构才会被接受
   rl_guidance_scale: 1.0  # (如果 rl_guidance=true, 此缩放才生效)
 
-  # --- (可选) 指定生成时使用的类别索引 ---
+  # --- 指定生成时使用的类别索引 ---
   target_label_index: 0 # 对应 "bennett"
 
 # --- 评估器配置 (动态奖励函数) ---
@@ -90,44 +90,37 @@ evaluator_config:
   # 注意: 评估器会按此列表的顺序执行。
   # 关键的 "硬约束" (如连通性) 应该放在最前面。
 
-  # --- 课程学习阶段 ---
-  # 定义每个门控检查点在总训练进度(百分比)的何时结束
-  curriculum_stages:
-    # 0% -> 30%: 只训练到 d_value_check
-    d_value_check: 0.3
-    # 30% -> 60%: 训练到 side_equality_check
-    side_equality_check: 0.6
-    # 60% -> 100%: 训练所有 (bennett_sine_law)
-
-  indicators:
-
-    # --- 1. 硬约束: 必须是一个有效的图 ---
-    # (此函数应返回 1.0 (通过) 或 -1.0 (失败))
+  # --- 区分“通用”和“特定”指标 ---
+  # 1. 通用指标 (始终运行, 无论标签是什么)
+  common_indicators:
     check_connectivity:
       enable: false
-      weight: 1.0  # R_total += 1.0 * (1.0 or -1.0)
-                   # (如果失败, evaluator 会 "fail-fast" 并立即返回)
-
-    # --- 2. 物理有效性: 必须是 1-DoF 机构 ---
-    # (此函数应返回 1.0 (DoF=1) 或 -0.5 (DoF != 1))
+      weight: 1.0
     check_dof:
       enable: false
-      weight: 1.0  # R_total += 1.0 * (1.0 or -0.5)
-
-    # --- 3. 相似性偏好: 奖励 4 杆机构 ---
-    # (此函数应返回 1.0 (4杆) 或 0.0 (其他))
-    check_topology_similarity:
-      enable: false
-      weight: 1.0  # R_total += 1.0 * (1.0 or 0.0)
-                   # (这就是您之前的 w_similarity)
-
-    # --- 4.  添加节点数惩罚 ---
+      weight: 1.0
     check_node_count_penalty:
       enable: false
-      weight: 1.0 # <-- 权重设为 1.0 (因为函数本身返回负值)
-      # R_total += 1.0 * ( penalty )
+      weight: 1.0
+      target_nodes: 4
+      node_penalty_scale: 0.05
 
-    # --- 5.  添加 Bennett 检查 ---
-    check_is_bennett:
-      enable: true   # <-- 启用
-      weight: 1.0    # <-- 给予一个额外的奖励权重
+  # 2. 特定标签的指标 (仅在匹配到标签时运行)
+  label_specific_indicators:
+
+    # --- Bennett 机构的评估流程 ---
+    "bennett":
+      check_is_bennett:
+        enable: true
+        weight: 1.0  # R_total = (所有通用指标) + 1.0 * (bennett得分)
+        existence_threshold: 0.05
+        bennett_error_threshold: 0.05
+
+    # --- 平面四杆机构的评估流程 ---
+    "planar_four_bar":
+      check_topology_similarity: # 确保它是一个4杆环
+        enable: true
+        weight: 0.5
+      _check_grashof_condition: # (这是你在README 中提到的)
+        enable: true
+        weight: 0.5
