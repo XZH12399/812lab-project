@@ -16,7 +16,6 @@ try:
         BasicTransformerBlock
     )
 except ImportError:
-    # print("警告: 无法从 .modules 导入, 尝试从 modules 导入 (适用于本地测试)")
     from modules import (
         TimestepEmbed,
         PatchEmbed,
@@ -28,16 +27,10 @@ except ImportError:
 # -----------------------------------------------------------------
 # 辅助函数: 噪声调度表 (Beta Schedule)
 # -----------------------------------------------------------------
-
 def get_beta_schedule(num_timesteps, schedule_type="linear"):
-    """
-    创建扩散过程的噪声调度表 (betas).
-    """
     if schedule_type == "linear":
-        # 线性调度: 从 1e-4 上升到 0.02
         return torch.linspace(1e-4, 0.02, num_timesteps)
     elif schedule_type == "cosine":
-        # Cosine 调度 (效果通常更好)
         s = 0.008
         steps = num_timesteps + 1
         x = torch.linspace(0, num_timesteps, steps)
@@ -55,13 +48,10 @@ def get_beta_schedule(num_timesteps, schedule_type="linear"):
 
 class DiffusionModel(nn.Module):
     """
-    一个完整的 DiT (Diffusion Transformer) 模型.
-    它包含了神经网络架构和扩散/采样逻辑.
-    使用 4 通道输入: [exists, a, alpha, d].
-    (钳位操作移至 sample 函数末尾)
-    (已更新!) DiT 模型, 支持类别条件 (Class Conditioning).
-    条件 c = t_embed + y_embed.
+    DiT (Diffusion Transformer) 模型.
+    使用 5 通道输入: [exists, joint_type, a, alpha, offset].
     """
+
     def __init__(self, config):
         """
         初始化模型.
@@ -70,17 +60,18 @@ class DiffusionModel(nn.Module):
         super().__init__()
 
         # --- 获取 Logger ---
-        self.logger = logging.getLogger()  # 获取根 logger (已在 train.py 中配置)
+        self.logger = logging.getLogger()
 
         # --- 读取配置 ---
-        model_config = config.get('diffusion_model', {})  # 添加默认空字典防止 KeyErrors
+        model_config = config.get('diffusion_model', {})
         data_config = config.get('data', {})
 
         self.img_size = model_config.get("img_size", 30)
         self.patch_size = model_config.get("patch_size", 5)
-        self.in_channels = model_config.get("in_channels", 4)
-        if self.in_channels != 4:
-            raise ValueError("模型配置中的 in_channels 必须为 4 ([exists, a, alpha, d])")
+
+        self.in_channels = model_config.get("in_channels", 5)  # 默认 5
+        if self.in_channels != 5:
+            raise ValueError("模型配置中的 in_channels 必须为 5 ([exists, joint_type, a, alpha, offset])")
 
         self.embed_dim = model_config.get("embed_dim", 768)
         self.depth = model_config.get("depth", 12)
@@ -93,16 +84,16 @@ class DiffusionModel(nn.Module):
         # --- 加载按通道的归一化值 ---
         try:
             norm_values_dict = data_config['normalization_values']
-            # 我们需要 [a, alpha, d] 三个通道的值
+            # 我们需要 [a, alpha, d] (d 即 offset) 三个通道的值
             norm_vec = torch.tensor([
                 norm_values_dict['a'],
                 norm_values_dict['alpha'],
-                norm_values_dict['d']
+                norm_values_dict['d']  # config 中的 key 保持 'd'
             ], dtype=torch.float32)  # shape [3]
 
             # 注册为 buffer (1, 3, 1, 1), 以便在 _normalize 中广播
             self.register_buffer('norm_vec', norm_vec.view(1, 3, 1, 1))
-            self.norm_value_alpha_max = norm_values_dict['alpha']  # 单独存储 alpha 最大值 (pi/2)
+            self.norm_value_alpha_max = norm_values_dict['alpha']
 
         except KeyError:
             raise ValueError("[致命错误] 配置文件中缺少 data.normalization_values 块。")
@@ -113,16 +104,13 @@ class DiffusionModel(nn.Module):
         self.num_patches = (self.img_size // self.patch_size) ** 2
 
         self.time_embed = TimestepEmbed(self.embed_dim)
-
-        # --- 添加类别嵌入层 ---
         self.label_embed = nn.Embedding(self.num_classes, self.embed_dim)
-        # (可选) 初始化嵌入层权重
         nn.init.normal_(self.label_embed.weight, std=0.02)
 
         self.patch_embed = PatchEmbed(
             img_size=self.img_size,
             patch_size=self.patch_size,
-            in_channels=self.in_channels,  # 使用 self.in_channels (值为4)
+            in_channels=self.in_channels,  # <-- 使用 5
             embed_dim=self.embed_dim
         )
 
@@ -138,36 +126,27 @@ class DiffusionModel(nn.Module):
 
         self.final_norm = nn.LayerNorm(self.embed_dim)
 
-        # --- 解码器线性层: (D) -> (P*P*C=4) ---
-        patch_dim = (self.patch_size ** 2) * self.in_channels  # C=4
+        # --- 解码器线性层: (D) -> (P*P*C=5) ---
+        patch_dim = (self.patch_size ** 2) * self.in_channels  # <-- C=5
         self.final_linear = nn.Linear(self.embed_dim, patch_dim)
 
         # --- 设置扩散过程参数 ---
         self.num_timesteps = model_config.get("timesteps", 1000)
-
         betas = get_beta_schedule(self.num_timesteps, model_config.get("schedule_type", "cosine"))
-        # 确保 betas 在正确的设备上创建
-        betas = betas.to(torch.float32)  # 确保类型正确
-
+        betas = betas.to(torch.float32)
         alphas = 1.0 - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
-
-        # 注册 buffers
         self.register_buffer('betas', betas)
         self.register_buffer('alphas', alphas)
         self.register_buffer('alphas_cumprod', alphas_cumprod)
-        # 在注册前确保 alphas_cumprod_prev 在同一设备
         alphas_cumprod_prev_init = torch.cat(
             [torch.tensor([1.0], device=betas.device, dtype=torch.float32), alphas_cumprod[:-1]])
         self.register_buffer('alphas_cumprod_prev', alphas_cumprod_prev_init)
-
         self.register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
         self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1.0 - alphas_cumprod))
-        self.register_buffer('sqrt_recip_alphas',
-                             torch.sqrt(1.0 / alphas))  # 使用 .reciprocal() 可能更安全: torch.sqrt(alphas.reciprocal())
-        # 在计算 posterior_variance 前确保所有张量在同一设备且类型正确
+        self.register_buffer('sqrt_recip_alphas', torch.sqrt(1.0 / alphas))
         posterior_variance_init = betas * (1. - self.alphas_cumprod_prev) / (1. - self.alphas_cumprod)
-        self.register_buffer('posterior_variance', torch.clamp(posterior_variance_init, min=1e-20))  # 添加 clamp 防止除零
+        self.register_buffer('posterior_variance', torch.clamp(posterior_variance_init, min=1e-20))
         posterior_mean_coef1_init = betas * torch.sqrt(self.alphas_cumprod_prev) / (1. - self.alphas_cumprod)
         self.register_buffer('posterior_mean_coef1', posterior_mean_coef1_init)
         posterior_mean_coef2_init = (1. - self.alphas_cumprod_prev) * torch.sqrt(alphas) / (1. - self.alphas_cumprod)
@@ -175,14 +154,15 @@ class DiffusionModel(nn.Module):
 
         self.logger.info(f"DiffusionTransformer (DiT) 模型已初始化 (输入通道: {self.in_channels}):")
         self.logger.info(f"  Embed Dim: {self.embed_dim}, Depth: {self.depth}, Heads: {self.num_heads}")
-        self.logger.info(f"  Image: {self.img_size}x{self.img_size}, Patch: {self.patch_size}, Patches: {self.num_patches}")
-        self.logger.info(f"  Normalization values (a, alpha, d): {self.norm_vec.squeeze().tolist()}")
+        self.logger.info(
+            f"  Image: {self.img_size}x{self.img_size}, Patch: {self.patch_size}, Patches: {self.num_patches}")
+        self.logger.info(f"  Normalization values (a, alpha, offset): {self.norm_vec.squeeze().tolist()}")
 
     # --- Unpatchify 辅助函数 ---
     def _unpatchify(self, x):
-        """将 Token 序列 (B, N, P*P*C=4) 转换回图像 (B, C=4, H, W)."""
+        """将 Token 序列 (B, N, P*P*C=5) 转换回图像 (B, C=5, H, W)."""
         P = self.patch_size
-        C = self.in_channels  # C=4
+        C = self.in_channels  # <-- C=5
         H = W = self.img_size
         num_patches_h = H // P
         num_patches_w = W // P
@@ -193,163 +173,104 @@ class DiffusionModel(nn.Module):
         )
         return x
 
-    # --- 归一化/反归一化 (处理4通道) ---
+    # --- 归一化/反归一化 (处理5通道) ---
     def _normalize(self, x_tensor):
-        """ 将 (B, 4, H, W) 数据按通道归一化到 [-1, 1] 范围."""
-        if x_tensor.shape[1] != 4: raise ValueError(f"通道数应为4, 收到 {x_tensor.shape[1]}")
+        """ 将 (B, 5, H, W) 数据按通道归一化到 [-1, 1] 范围."""
+        if x_tensor.shape[1] != 5: raise ValueError(f"通道数应为5, 收到 {x_tensor.shape[1]}")
 
-        exists_channel = x_tensor[:, 0:1, :, :]  # (B, 1, H, W)
-        other_channels = x_tensor[:, 1:, :, :]  # (B, 3, H, W) (a, alpha, d)
+        exists_channel = x_tensor[:, 0:1, :, :]  # (B, 1, H, W) (0/1)
+        joint_type_channel = x_tensor[:, 1:2, :, :]  # (B, 1, H, W) (-1/1)
+        other_channels = x_tensor[:, 2:, :, :]  # (B, 3, H, W) (a, alpha, offset)
 
         exists_norm = exists_channel * 2.0 - 1.0  # 0/1 -> -1/1
 
-        # 按通道归一化: (B, 3, H, W) / (1, 3, 1, 1)
+        # joint_type 已经是 -1/1, 无需操作
+        joint_type_norm = joint_type_channel
+
+        # 按通道归一化 [a, alpha, offset]: (B, 3, H, W) / (1, 3, 1, 1)
         other_norm = (other_channels / (self.norm_vec + 1e-8)) * 2.0 - 1.0
 
-        return torch.cat([exists_norm, other_norm], dim=1)
+        return torch.cat([exists_norm, joint_type_norm, other_norm], dim=1)
 
     def _unnormalize(self, x_tensor_norm):
-        """ 将 (B, 4, H, W) 数据从 [-1, 1] 按通道恢复到原始范围."""
-        if x_tensor_norm.shape[1] != 4: raise ValueError(f"通道数应为4, 收到 {x_tensor_norm.shape[1]}")
+        """ 将 (B, 5, H, W) 数据从 [-1, 1] 按通道恢复到原始范围."""
+        if x_tensor_norm.shape[1] != 5: raise ValueError(f"通道数应为5, 收到 {x_tensor_norm.shape[1]}")
 
         exists_norm = x_tensor_norm[:, 0:1, :, :]  # (B, 1, H, W)
-        other_norm = x_tensor_norm[:, 1:, :, :]  # (B, 3, H, W)
+        joint_type_norm = x_tensor_norm[:, 1:2, :, :]  # (B, 1, H, W)
+        other_norm = x_tensor_norm[:, 2:, :, :]  # (B, 3, H, W)
 
         exists_unnorm = (exists_norm + 1.0) / 2.0  # -1/1 -> 0/1
 
-        # 按通道反归一化: (B, 3, H, W) * (1, 3, 1, 1)
+        # joint_type 保持 -1/1
+        joint_type_unnorm = joint_type_norm
+
+        # 按通道反归一化 [a, alpha, offset]: (B, 3, H, W) * (1, 3, 1, 1)
         other_unnorm = ((other_norm + 1.0) / 2.0) * self.norm_vec
 
-        return torch.cat([exists_unnorm, other_unnorm], dim=1)
+        return torch.cat([exists_unnorm, joint_type_unnorm, other_unnorm], dim=1)
 
     # --- 前向传播 (接收标签 y) ---
     def forward(self, x_norm, t, y):
         """
-        (已更新!) 接收 *归一化* 的 x_t_norm (B, 4, H, W), t (B,), 和标签 y (B,),
+        接收 *归一化* 的 x_t_norm (B, 5, H, W), t (B,), 和标签 y (B,),
         预测 *归一化* 的噪声.
         """
-        # 1. 时间嵌入
-        t_embed = self.time_embed(t)  # (B, D)
-
-        # 2. --- (新!) 类别嵌入 ---
-        y_embed = self.label_embed(y)  # (B, D)
-
-        # 3. --- (新!) 合并条件 ---
-        c = t_embed + y_embed  # (B, D) (简单相加)
-
-        # 4. Patch 嵌入 + 位置编码 (不变)
+        t_embed = self.time_embed(t)
+        y_embed = self.label_embed(y)
+        c = t_embed + y_embed
         x = self.patch_embed(x_norm)
         x = self.pos_embed(x)
-
-        # 5. Transformer 核心 (传入合并后的 c)
         for block in self.blocks:
-            x = block(x, c)  # <-- 使用合并的 c
-
-        # 6. 解码 (不变)
+            x = block(x, c)
         x = self.final_norm(x)
         x = self.final_linear(x)
         noise_pred_norm = self._unpatchify(x)
-
         return noise_pred_norm
 
     # --- 扩散过程辅助函数 ---
     def _get_tensor_values(self, val, t):
-        """
-        从调度表 `val` (shape [T]) 中, 根据 `t` (shape [B]) 提取正确的时间步参数.
-        并重塑为 (B, 1, 1, 1) 以便广播.
-        """
         batch_size = t.shape[0]
-        # 确保 t 是 LongTensor 并且在 val 的设备上
         t_long = t.long().to(val.device)
-        # 使用 t 作为索引, 从 val 中 "收集" 正确的参数
         out = val.gather(-1, t_long)
-        # 将 (B,) 重塑为 (B, 1, 1, 1)
         return out.reshape(batch_size, 1, 1, 1)
 
     def q_sample(self, x_start_norm, t, noise=None):
-        """
-        (修正后版本) 前向加噪过程.
-        接收 *归一化* x_start_norm, 返回 *归一化* 的 x_t_norm.
-        """
         if noise is None:
             noise = torch.randn_like(x_start_norm)
-
         sqrt_alphas_cumprod_t = self._get_tensor_values(self.sqrt_alphas_cumprod, t)
         sqrt_one_minus_alphas_cumprod_t = self._get_tensor_values(self.sqrt_one_minus_alphas_cumprod, t)
-
-        # x_t_norm = sqrt(alpha_bar_t) * x_start_norm + sqrt(1 - alpha_bar_t) * noise_norm
         x_t_norm = sqrt_alphas_cumprod_t * x_start_norm + sqrt_one_minus_alphas_cumprod_t * noise
         return x_t_norm
 
     def _x0_from_noise(self, x_t_norm, t, noise_norm):
-        """
-        从 *归一化* 的 x_t 和预测的 *归一化* 噪声中计算 *归一化* 的 x_0_pred_norm
-        """
-        # 使用 .reciprocal() 可能更安全
         sqrt_recip_alphas_cumprod_t = self._get_tensor_values(self.alphas_cumprod.sqrt().reciprocal(), t)
         sqrt_one_minus_alphas_cumprod_t = self._get_tensor_values(self.sqrt_one_minus_alphas_cumprod, t)
-
         x_0_pred_norm = sqrt_recip_alphas_cumprod_t * (x_t_norm - sqrt_one_minus_alphas_cumprod_t * noise_norm)
         return x_0_pred_norm
 
     # --- 反向去噪 (p_sample, 无中间钳位) ---
     def p_sample(self, x_t_norm, t, t_index, y, guidance_fn=None, guidance_scale=1.0):
-        """
-        (已更新!) 反向去噪一步, 支持RL引导, **接收标签 y**.
-        输入: 归一化的 x_t_norm, t, y
-        输出: 归一化的 x_{t-1}_norm
-        """
-        # 1. 获取扩散参数
+        # 在归一化空间操作, 通道数不影响它
         betas_t = self._get_tensor_values(self.betas, t)
         sqrt_one_minus_alphas_cumprod_t = self._get_tensor_values(self.sqrt_one_minus_alphas_cumprod, t)
         sqrt_recip_alphas_t = self._get_tensor_values(self.sqrt_recip_alphas, t)
-
-        # 2. --- 预测噪声 (传入 y) ---
-        predicted_noise_norm = self.forward(x_t_norm, t, y)  # <-- 传入
-
-        # 3. (可选) RL 引导 (RL Agent 的意见)
+        predicted_noise_norm = self.forward(x_t_norm, t, y)
         if guidance_fn is not None:
             gradient = guidance_fn(x_t_norm, t, y)
-            # 应用引导 (与之前相同)
             predicted_noise_norm = predicted_noise_norm - sqrt_one_minus_alphas_cumprod_t * guidance_scale * gradient
-
-        # 4. 计算 x_0 的初步估计 (归一化)
-        #    *** 使用可能被引导过的噪声 ***
         x_0_pred_norm = self._x0_from_noise(x_t_norm, t, predicted_noise_norm)
-
-        # --- 5. 应用 "动态阈值" ---
-
-        # 这是一个超参数, 0.995 是一个常用的起始值
         dynamic_threshold_percentile = 0.995
-
-        # 5a. 获取批次中所有像素的绝对值 (B, C, H, W) -> (B*C*H*W)
         abs_x0_flat = x_0_pred_norm.abs().view(-1)
-
-        # 5b. 找到第 P 百分位的值 (e.g., 1.3)
         s = torch.quantile(abs_x0_flat, dynamic_threshold_percentile)
-
-        # 5c. 如果 s > 1.0 (意味着开始"溢出"), 就启用钳位, 否则不处理
-        # (我们添加一个 1e-6 防止 s=0)
         s = torch.max(s, torch.tensor(1.0, device=s.device))
-
-        # 5d. "智能"钳位: 钳位到 [-s, s] 范围
         x_0_pred_norm = torch.clamp(x_0_pred_norm, -s, s)
-
-        # # 5e. (可选, 但推荐) 将其"缩放"回 [-1, 1] 范围
-        # x_0_pred_norm = x_0_pred_norm / (s + 1e-6)
-
-        # --- 6. 使用【原始预测】的 x_0_pred_norm 计算 x_{t-1} 的均值 ---
         posterior_mean_coef1_t = self._get_tensor_values(self.posterior_mean_coef1, t)
         posterior_mean_coef2_t = self._get_tensor_values(self.posterior_mean_coef2, t)
-        # *** 使用未经钳位的 x_0_pred_norm ***
         posterior_mean = posterior_mean_coef1_t * x_0_pred_norm + posterior_mean_coef2_t * x_t_norm
-
-        # 7. 添加噪声 (采样)
         posterior_variance_t = self._get_tensor_values(self.posterior_variance, t)
         noise = torch.randn_like(x_t_norm)
         nonzero_mask = (t != 0).float().view(-1, *([1] * (len(x_t_norm.shape) - 1)))
-
-        # 返回归一化的 x_{t-1}_norm
         return posterior_mean + nonzero_mask * torch.sqrt(posterior_variance_t) * noise
 
     # --- 采样函数 (sample, 在末尾钳位) ---
@@ -357,74 +278,73 @@ class DiffusionModel(nn.Module):
     def sample(self, num_samples, y, guidance_fn=None, guidance_scale=1.0):
         """
         完整的采样循环. **接收标签 y**.
-        包含 "平移不变性" 约束 (在 4d 和 4e 之间).
+        返回: (generated_mechanisms_list, pure_x0_norm_batch)
         """
-        self.logger.info(f"开始采样 {num_samples} 个新机构 (格式: [exists, a, alpha, d])...")
+        self.logger.info(f"开始采样 {num_samples} 个新机构 (格式: [exists, joint_type, a, alpha, offset])...")
         device = next(self.parameters()).device
 
         # 1. 从纯噪声 x_T 开始 (归一化空间)
-        shape = (num_samples, self.in_channels, self.img_size, self.img_size)
+        shape = (num_samples, self.in_channels, self.img_size, self.img_size)  # C=5
         x_t_norm = torch.randn(shape, device=device)
 
-        # 2. 从 T 循环到 1 (传入 y)
+        # 2. 从 T 循环到 1
         for t_index in tqdm(reversed(range(0, self.num_timesteps)), desc="DDPM 采样", total=self.num_timesteps):
             t = torch.full((num_samples,), t_index, device=device, dtype=torch.long)
-            # --- (核心修改!) 调用 p_sample 时传入 y ---
             x_t_norm = self.p_sample(x_t_norm, t, t_index, y, guidance_fn, guidance_scale)
 
-        # 3. x_0_norm 就是最终的 x_t_norm
+        # 3. x_0_norm 就是最终的 x_t_norm (B, 5, H, W)
+        #    这是我们需要的 "纯粹" x_0_norm (在GPU上)
         x_0_norm = x_t_norm
 
         # 4. 在采样结束后进行【一次性】反归一化和钳位
         # 4a. 反归一化
-        x_0_unnorm = self._unnormalize(x_0_norm)  # (B, 4, H, W)
+        x_0_unnorm = self._unnormalize(x_0_norm)  # (B, 5, H, W)
 
         # 4b. 分离通道
-        exists_unnorm, a_unnorm, alpha_unnorm, d_unnorm = torch.chunk(x_0_unnorm, 4, dim=1)
+        exists_unnorm, joint_type_unnorm, a_unnorm, alpha_unnorm, offset_unnorm = torch.chunk(x_0_unnorm, 5, dim=1)
 
         # 4c. 钳位 exists 通道 (阈值 0.5)
         exists_clamped = (exists_unnorm > 0.5).float()  # 变为 0.0 或 1.0
 
-        # 4d. 钳位 a, alpha, d 通道 (物理约束)
+        # 4c-bis. 钳位 joint_type 通道 (阈值 0)
+        # > 0 变为 +1 (R), <= 0 变为 -1 (P)
+        joint_type_clamped = torch.where(joint_type_unnorm > 0, 1.0, -1.0)
+
+        # 4d. 钳位 a, alpha, offset 通道 (物理约束)
         a_clamped = torch.clamp(a_unnorm, min=0.0)
         alpha_clamped = torch.clamp(alpha_unnorm, min=0.0, max=math.pi / 2.0)
-        d_clamped = torch.clamp(d_unnorm, min=0.0)  # (B, 1, H, W)
+        offset_clamped = torch.clamp(offset_unnorm, min=0.0)  # (B, 1, H, W)
 
         # --- 步骤 4d-bis: 应用轴向平移不变性 ---
-        # (这必须在 4e 之前 执行)
-
-        # 1. 我们只关心 '存在' 的连杆。 (B, 1, H, W)
         exists_mask = (exists_clamped > 0.5)
 
-        # 2. 我们将 '不存在' 的连杆的 d 值设为无穷大, 这样它们就不会被选为最小值
-        d_for_min_finding = d_clamped.clone()
-        d_for_min_finding[~exists_mask] = float('inf')  # ~exists_mask 是 '不存在' 的掩码
+        offset_for_min_finding = offset_clamped.clone()
+        offset_for_min_finding[~exists_mask] = float('inf')
 
-        # 3. 沿轴 'i' (即 H 维度) 找到每根轴的最小偏移量
-        #    我们在 W 维度 (k) 上寻找最小值
-        #    keepdim=True 使其形状为 (B, 1, H, 1)
-        min_offsets_per_axis = torch.min(d_for_min_finding, dim=3, keepdim=True)[0]  # [0] 获取值
+        min_offsets_per_axis = torch.min(offset_for_min_finding, dim=3, keepdim=True)[0]
 
-        # 4. 处理那些没有任何连杆连接的轴 (它们的最小值是 'inf')
-        #    我们将 'inf' 替换为 0, 这样它们就不会被减去任何值
         min_offsets_per_axis = torch.where(
             torch.isinf(min_offsets_per_axis),
             0.0,
             min_offsets_per_axis
         )
 
-        # 5. 从所有 d 值中减去其对应轴的最小值
-        #    广播: (B, 1, H, W) = (B, 1, H, W) - (B, 1, H, 1)
-        d_clamped = d_clamped - min_offsets_per_axis
-        #    (例如: [3, 4, 5] - [3] = [0, 1, 2])
+        offset_clamped = offset_clamped - min_offsets_per_axis
 
-        # 4e. 如果 exists=0, 强制 a,alpha,d 为 0
+        # 4e. 如果 exists=0, 强制 a,alpha,offset,joint_type 为 0
         a_clamped = a_clamped * exists_clamped
         alpha_clamped = alpha_clamped * exists_clamped
-        d_clamped = d_clamped * exists_clamped  # (现在 d_clamped 已经被归一化, 并且不存的连杆被设为0)
+        offset_clamped = offset_clamped * exists_clamped
+        joint_type_clamped = joint_type_clamped * exists_clamped
 
         # 4f. 重新组合通道 (最终的、钳位后的、未归一化的结果)
-        x_0_final_unnorm = torch.cat([exists_clamped, a_clamped, alpha_clamped, d_clamped], dim=1)
+        x_0_final_unnorm = torch.cat([
+            exists_clamped,
+            joint_type_clamped,
+            a_clamped,
+            alpha_clamped,
+            offset_clamped
+        ], dim=1)
 
         # 5. 转换 (B, C, H, W) -> (B, H, W, C) 并移到 CPU
         x_0_numpy = x_0_final_unnorm.permute(0, 2, 3, 1).cpu().numpy()
@@ -433,4 +353,8 @@ class DiffusionModel(nn.Module):
         generated_mechanisms = [x_0_numpy[i] for i in range(num_samples)]
 
         self.logger.info(f"采样完成. 共生成 {len(generated_mechanisms)} 个机构张量 (已应用最终钳位)。")
-        return generated_mechanisms  # 返回钳位后、未归一化的 (H, W, 4) Numpy 数组列表
+
+        # --- 返回两个值 ---
+        # 1. 列表: 后处理的 numpy 数组 (用于评估和保存)
+        # 2. 批张量: 纯粹的 x_0_norm (用于 RL 缓冲区)
+        return generated_mechanisms, x_0_norm

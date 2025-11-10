@@ -57,7 +57,7 @@ diffusion_model:
   # 数据/Patch 形状
   img_size: 6       # 必须与 data.max_nodes 一致
   patch_size: 2      # 30 % 5 == 0
-  in_channels: 4     # 新: [exists, a, alpha, d]
+  in_channels: 5     # 新: [exists, joint_type, a, alpha, d]
   
   # Transformer 架构
   embed_dim: 768     # Transformer 隐藏层维度
