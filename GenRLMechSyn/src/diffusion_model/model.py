@@ -335,7 +335,6 @@ class DiffusionModel(nn.Module):
         a_clamped = a_clamped * exists_clamped
         alpha_clamped = alpha_clamped * exists_clamped
         offset_clamped = offset_clamped * exists_clamped
-        joint_type_clamped = joint_type_clamped * exists_clamped
 
         # 4f. 重新组合通道 (最终的、钳位后的、未归一化的结果)
         x_0_final_unnorm = torch.cat([
