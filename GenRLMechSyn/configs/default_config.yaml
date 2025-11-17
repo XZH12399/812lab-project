@@ -11,21 +11,22 @@ data:
   
   # --- 按通道设置归一化最大值 ---
   # 扩散模型在 [-1, 1] 范围内工作效果最好
-  # exists: 0/1   -> -1/1 (由代码硬编码)
+  # mixed:  [0, 1.0]       -> [-1, 1]
   # a:      [0, a_max]     -> [-1, 1]
   # alpha:  [0, alpha_max] -> [-1, 1]
   # d:      [0, d_max]     -> [-1, 1]
   normalization_values:
-    a: 20.0       # 假设连杆长度 a 最大为 20.0
-    alpha: 1.5708 # (pi/2) 扭转角的物理最大值
-    d: 20.0       # 假设偏移量 d 最大为 20.0
+    mixed: 1.0      # Ch 0: mixed (exists/joint_type) 的最大值
+    a: 20.0       # Ch 1: 假设连杆长度 a 最大为 20.0
+    alpha: 1.5708 # Ch 2: (pi/2) 扭转角的物理最大值
+    d: 20.0       # Ch 3: 假设偏移量 d 最大为 20.0
 
 # --- 训练参数 ---
 training:
   # --- DiT 预热阶段 ---
   dit_warmup_epochs: 50    # DiT 预热训练轮次 (仅在随机初始化时执行)
                              # 对于小数据集(10个样本), 建议 100-200 轮
-                             # 设为 0 则跳过预热
+                             # 设为 0 则跳过
   # --- RL 预热阶段 ---
   rl_warmup_epochs: 50     # 在主循环前, RL Agent 在初始数据集上训练多少"轮"
                             # (每轮会训练 5 个 epoch, 见 agent.py)
@@ -57,7 +58,7 @@ diffusion_model:
   # 数据/Patch 形状
   img_size: 6       # 必须与 data.max_nodes 一致
   patch_size: 2      # 30 % 5 == 0
-  in_channels: 4     # 新: [exists, a, alpha, d]
+  in_channels: 4     # 新: [mixed(exists/joint_type), a, alpha, d]
   
   # Transformer 架构
   embed_dim: 768     # Transformer 隐藏层维度
