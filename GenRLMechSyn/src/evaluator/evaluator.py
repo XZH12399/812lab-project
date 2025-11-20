@@ -6,6 +6,7 @@ import math
 
 
 class MechanismEvaluator:
+    # ( ... __init__, _print_enabled_indicators, evaluate, _build_graph ... 均不变)
     def __init__(self, config):
         self.config = config
         try:
@@ -41,12 +42,10 @@ class MechanismEvaluator:
                     print(f"    [ON]  {name} (Weight: {conf.get('weight', 0.0)})")
         print("------------------------")
 
-    # --- 1. 核心评估函数 (Orchestrator) ---
     def evaluate(self, mechanism_tensor, target_label=None, current_cycle=None, total_cycles=None):
         G = self._build_graph(mechanism_tensor)
         if G.number_of_nodes() == 0: return -1.0
         total_reward = 0.0
-        # 通用指标循环
         for name, conf in self.common_indicator_config.items():
             if not conf.get('enable', False): continue
             try:
@@ -65,7 +64,6 @@ class MechanismEvaluator:
                 score = 0.0
             total_reward += conf.get('weight', 0.0) * score
             if score <= -0.9: return total_reward
-        # 特定标签指标循环
         if target_label and target_label in self.label_specific_indicator_config:
             specific_indicators = self.label_specific_indicator_config[target_label]
             for name, conf in specific_indicators.items():
@@ -88,13 +86,8 @@ class MechanismEvaluator:
                 if score <= -0.9: return total_reward
         return total_reward
 
-    # --- 2. 图形构建 (Helper) ---
     def _build_graph(self, tensor):
-        """
-        从 (N, N, 5) 张量构建 NetworkX 图.
-        使用 'exists' 通道 (0) 判断连接 (双向确认).
-        """
-        exists_matrix = tensor[:, :, 0]  # 通道 0 仍然是 exists
+        exists_matrix = tensor[:, :, 0]
         current_max_nodes = self.max_nodes
         G = nx.Graph()
         nodes_with_edges = set()
@@ -114,12 +107,13 @@ class MechanismEvaluator:
             return nx.Graph()
         return G_main
 
-    # --- 3. 模块化指标函数 (Indicators) ---
+    # ( ... _get_error_score, _calculate_DoF, _check_connectivity, _check_dof,
+    #   _check_topology_similarity, _check_node_count_penalty ... 均不变)
     def _get_error_score(self, error_value, threshold):
         if threshold < 1e-6:
             return 1.0 if error_value < 1e-6 else -1.0
         score = (threshold - error_value) / threshold
-        return max(0.0, min(1.0, score))  # 钳位在 [-1, 1]
+        return max(0.0, min(1.0, score))
 
     def _calculate_DoF(self, G, tensor):
         num_links = G.number_of_edges()
@@ -158,10 +152,10 @@ class MechanismEvaluator:
         penalty = - node_penalty_scale * (deviation ** 2)
         return max(-1.0, penalty)
 
-    # --- 指标5: Bennett 检查 ---
+    # --- (核心修改!) 指标5: Bennett 检查 ---
     def _check_is_bennett(self, G, tensor, conf, current_cycle=None, total_cycles=None, **kwargs):
         """
-        检查机构与 Bennett 约束的接近程度.
+        (已修改!) joint_type (通道 1) 检查逻辑被简化。
         通道: [0:exists, 1:joint_type, 2:a, 3:alpha, 4:offset]
         """
         existence_threshold = conf.get('existence_threshold', 0.05)
@@ -177,41 +171,26 @@ class MechanismEvaluator:
         partial_score = 0.2  # 基础分: 这是一个4杆环
 
         try:
-            # --- 门槛 1b: 检查是否所有关节都是 R 副 (+1) ---
-            # 检查所有邻居, 而非随机一个
+            # --- (核心修改!) 门槛 1b: 检查是否所有关节都是 R 副 (+1) ---
             nodes = list(G.nodes())
             for node_i in nodes:
-                # 检查关节 i 的类型.
-                # 我们必须检查所有邻居, 确保它们都同意 i 是 R 副.
-                all_neighbors = list(G.neighbors(node_i))
+                # 新逻辑: 只需检查一个元素 (e.g., [i, 0] 或 [i, i])
+                # 因为 sample() 和 dataloader 保证了整行 [i, :, 1] 都是一样的
 
-                if not all_neighbors:
-                    # 这不应该在4杆环中发生, 但作为安全检查
-                    return 0.0
+                # 我们从 tensor[node_i, 0, 1] 读取 (0 是任意选择的列索引)
+                joint_type_i = tensor[node_i, 0, 1]  # 通道 1: joint_type
 
-                all_agree_is_R = True
-                for neighbor_k in all_neighbors:
-                    # 我们从 tensor[i, k, 1] 读取
-                    joint_type_i = tensor[node_i, neighbor_k, 1]  # 通道 1: joint_type
-
-                    if joint_type_i <= 0:  # 如果是 -1 (P 副) 或 0 (不明确)
-                        all_agree_is_R = False
-                        break  # 发现一个P副, 停止检查此节点
-
-                if not all_agree_is_R:
+                if joint_type_i <= 0:  # 如果是 -1 (P 副) 或 0 (无效/未连接)
                     return 0.0  # 硬失败, Bennett 必须是全 R 副
+            # --- 修改结束 ---
 
             # --- 训练进度 ---
             progress_percent = 1.0
             if current_cycle is not None and total_cycles is not None and total_cycles > 0:
                 progress_percent = (current_cycle + 1) / total_cycles
 
-            # nodes = list(G.nodes()) # 已在上面获取
             path_edges = list(nx.find_cycle(G, source=nodes[0]))
             if len(path_edges) != 4: return partial_score
-
-            # print('\n')
-            # print(path_edges)
 
             # --- 门槛 2: 检查 offset=0 (d=0) ---
             D_REWARD_TOTAL = 0.3
@@ -220,11 +199,8 @@ class MechanismEvaluator:
             ordered_params = []
 
             for u, v in path_edges:
-                # d -> offset, 通道 3 -> 4
                 d_u = tensor[u, v, 4]  # 通道 4: offset
-                d_v = tensor[v, u, 4]  # 通道 4: offset
-                # print("d_u", d_u, "d_v", d_v)
-
+                d_v = tensor[v, u, 4]
                 if abs(d_u) <= existence_threshold:
                     partial_score += D_REWARD_PER_PARAM
                 else:
@@ -234,18 +210,14 @@ class MechanismEvaluator:
                 else:
                     all_d_are_zero = False
 
-                # a 通道 1->2, alpha 通道 2->3
                 a = tensor[u, v, 2];  # 通道 2: a
                 alpha = tensor[u, v, 3]  # 通道 3: alpha
-
                 if a < 0.0 or alpha < 0.0: return partial_score
                 ordered_params.append({'a': a, 'alpha': alpha})
 
             if len(ordered_params) != 4: return partial_score
             if not all_d_are_zero:
-                # print(f"offset-value check FAILED GATE. Final score: {partial_score}")
                 return partial_score
-            # print(f"offset-value check PASSED GATE. Current score: {partial_score}")
 
             p1, p2, p3, p4 = ordered_params
 
@@ -256,8 +228,6 @@ class MechanismEvaluator:
             a_error_2 = abs(p2['a'] - p4['a']) / (max(p2['a'], p4['a']) + 1e-6)
             alpha_error_1 = abs(p1['alpha'] - p3['alpha']) / (max(p1['alpha'], p3['alpha']) + 1e-6)
             alpha_error_2 = abs(p2['alpha'] - p4['alpha']) / (max(p2['alpha'], p4['alpha']) + 1e-6)
-            # print("a_error_1", a_error_1, "a_error_2", a_error_2)
-            # print("alpha_error_1", alpha_error_1, "alpha_error_2", alpha_error_2)
             all_sides_equal = (a_error_1 < bennett_error_threshold and
                                a_error_2 < bennett_error_threshold and
                                alpha_error_1 < bennett_error_threshold and
@@ -267,13 +237,10 @@ class MechanismEvaluator:
                 if a_error_2 < bennett_error_threshold: partial_score += (A_REWARD_MAX / 2.0)
                 if alpha_error_1 < bennett_error_threshold: partial_score += (ALPHA_REWARD_MAX / 2.0)
                 if alpha_error_2 < bennett_error_threshold: partial_score += (ALPHA_REWARD_MAX / 2.0)
-                # print(f"Side equality check FAILED GATE. Final score: {partial_score}")
                 return partial_score
             partial_score += A_REWARD_MAX + ALPHA_REWARD_MAX
-            # print(f"Side-equality check PASSED GATE. Current score: {partial_score}")
 
             # --- 门槛 4: Bennett 正弦法则 ---
-            # print("Proceeding to Bennett Sine Law check (Final Stage)...")
             BENNETT_REWARD_MAX = 0.1
             a1, alpha1 = p1['a'], p1['alpha']
             a2, alpha2 = p2['a'], p2['alpha']
@@ -284,11 +251,8 @@ class MechanismEvaluator:
                 val1 = a1 / sin_alpha2
                 val2 = a2 / sin_alpha1
                 bennett_error_rel = abs(val1 - val2) / (max(abs(val1), abs(val2)) + 1e-6)
-                # print("bennett_error_rel", bennett_error_rel)
                 if bennett_error_rel < bennett_error_threshold:
                     partial_score += BENNETT_REWARD_MAX
-            # print("final_score:", partial_score)
             return partial_score
         except Exception as e:
-            # print(f"Error during Bennett check: {e}") # 调试
             return partial_score
