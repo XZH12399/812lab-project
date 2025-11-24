@@ -1,0 +1,21 @@
+# GenRLMechSyn Project Requirements
+
+# Core deep learning framework
+torch==2.1.0  # Or a more recent stable version compatible with your CUDA
+torchvision==0.16.0 # Usually installed with torch, matching version
+
+# Numerical computation and data handling
+numpy<2.0      # Crucial! Pinning below 2.0 to avoid compatibility issues we encountered
+scipy          # Often required by networkx for graph algorithms
+
+# Configuration file handling
+pyyaml         # For reading .yaml config files
+
+# Transformer utilities
+einops         # For efficient tensor manipulation in DiT
+
+# Progress bars
+tqdm           # For displaying progress during sampling and training
+
+# Graph analysis in Evaluator
+networkx       # For building graphs and checking connectivity/DoF

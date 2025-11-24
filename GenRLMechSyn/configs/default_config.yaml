@@ -1,0 +1,142 @@
+# configs/default_config.yaml
+
+project_name: "GenRLMechSyn"
+timestamp: "20251023"
+
+# --- 数据集设置 ---
+data:
+  initial_manifest_path: "data/initial_dataset/metadata.json"
+  augmented_manifest_path: "data/augmented_dataset/metadata.json"
+  max_nodes: 6 # 用于张量填充, 必须与 diffusion_model.img_size 一致
+  
+  # --- 按通道设置归一化最大值 ---
+  # 扩散模型在 [-1, 1] 范围内工作效果最好
+  # exists: 0/1   -> -1/1 (由代码硬编码)
+  # a:      [0, a_max]     -> [-1, 1]
+  # alpha:  [0, alpha_max] -> [-1, 1]
+  # d:      [0, d_max]     -> [-1, 1]
+  normalization_values:
+    a: 20.0       # 假设连杆长度 a 最大为 20.0
+    alpha: 1.5708 # (pi/2) 扭转角的物理最大值
+    d: 20.0       # 假设偏移量 d 最大为 20.0
+
+# --- 训练参数 ---
+training:
+  # --- DiT 预热阶段 ---
+  dit_warmup_epochs: 50    # DiT 预热训练轮次 (仅在随机初始化时执行)
+                             # 对于小数据集(10个样本), 建议 100-200 轮
+                             # 设为 0 则跳过预热
+  # --- RL 预热阶段 ---
+  rl_warmup_epochs: 50     # 在主循环前, RL Agent 在初始数据集上训练多少"轮"
+                            # (每轮会训练 5 个 epoch, 见 agent.py)
+                            # 设为 0 则跳过
+
+  # --- 主循环参数 ---
+  num_cycles: 300            # 总共进行多少轮"生成-增强"循环 (小数据集减少循环次数)
+  epochs_per_cycle: 50      # 每个循环中, 扩散模型训练多少个 epoch (小数据集减少训练轮次)
+  batch_size: 8             # 数据集小, 批次大小改为 8 (避免过拟合)
+  learning_rate: 0.0001
+  rl_learning_rate: 0.00001
+  device: "cuda"            # 如果有NVIDIA GPU, 使用 "cuda", 否则使用 "cpu"
+
+  replay_buffer_limit: 10000  # Replay Buffer 最大容量
+
+  # --- 模型保存与加载 ---
+  save_checkpoint_path: "checkpoints/training_checkpoint.pth" # 保存权重到这个文件
+  load_checkpoint_path: null # 默认不加载 (设为 "checkpoints/training_checkpoint.pth" 来加载)
+
+  enable_rl_guidance: true   # true: RLAgent 会引导 DiT 采样
+                             # false: 纯 DiT 采样 (guidance_fn = None)
+  enable_augmentation: false  # true: 高分机构会被保存到 augmented_dataset
+                             # false: 数据集不会被扩充
+
+  random_seed: 42 # 添加随机数种子
+
+# --- 模型参数 (DiT) ---
+diffusion_model:
+  # 数据/Patch 形状
+  img_size: 6       # 必须与 data.max_nodes 一致
+  patch_size: 2      # 30 % 5 == 0
+  in_channels: 5     # 新: [exists, joint_type, a, alpha, d]
+  
+  # Transformer 架构
+  embed_dim: 768     # Transformer 隐藏层维度
+  depth: 12          # Transformer 块 (blocks) 的数量
+  num_heads: 12        # 注意力头的数量
+  
+  # 扩散过程
+  timesteps: 1000
+  schedule_type: "cosine" # 推荐 'cosine', 备选 'linear'
+
+  # --- 添加类别数量 ---
+  num_classes: 1 # 目前只有一个类别 "bennett"
+
+# --- 新增 Solver 配置 ---
+solver:
+  max_iterations: 30   # 增加迭代次数以提高成功率
+  step_size: 0.8       # 稍微保守一点的步长
+
+# --- 生成与评估 ---
+generation:
+  num_to_generate: 50   # 每个循环生成多少个新机构 (小数据集减少生成数量)
+  acceptance_threshold: 1.98 # 评估分数高于此阈值的机构才会被接受
+
+  # 软优化容忍度
+  # 只有 Optimization Loss (闭环+几何) 低于此值的机构，
+  # 才会进入后续的 Evaluator 评分环节，否则直接标记为 FAIL。
+  # 建议设为 0.5 或 1.0 (视 Loss 的量级而定)
+  optimization_tolerance: 0.001
+
+  rl_guidance_scale: 1.0  # (如果 rl_guidance=true, 此缩放才生效)
+
+  # --- 指定生成时使用的类别索引 ---
+  target_label_index: 0 # 对应 "bennett"
+
+# --- 评估器配置 (动态奖励函数) ---
+evaluator_config:
+  # R_total = SUM( weight * score_of_function )
+  #
+  # 'enable': (true/false) 是否运行此评估函数
+  # 'weight': (float) 此函数的分数所占的权重
+  #
+  # 注意: 评估器会按此列表的顺序执行。
+  # 关键的 "硬约束" (如连通性) 应该放在最前面。
+
+  # --- 区分“通用”和“特定”指标 ---
+  # 1. 通用指标 (始终运行, 无论标签是什么)
+  common_indicators:
+    check_connectivity:
+      enable: false
+      weight: 1.0
+    check_dof:
+      enable: false
+      weight: 1.0
+    check_node_count_penalty:
+      enable: false
+      weight: 1.0
+      target_nodes: 4
+      node_penalty_scale: 0.05
+    # 新增: 物理求解检查 (最硬核的检查)
+    check_kinematic_feasibility:
+      enable: true
+      weight: 1.0  # 给它很高的权重！因为闭环是根本。
+
+  # 2. 特定标签的指标 (仅在匹配到标签时运行)
+  label_specific_indicators:
+
+    # --- Bennett 机构的评估流程 ---
+    "bennett":
+      check_is_bennett:
+        enable: true
+        weight: 1.0  # R_total = (所有通用指标) + 1.0 * (bennett得分)
+        existence_threshold: 0.05
+        bennett_error_threshold: 0.05
+
+    # --- 平面四杆机构的评估流程 ---
+    "planar_four_bar":
+      check_topology_similarity: # 确保它是一个4杆环
+        enable: false
+        weight: 0.5
+      _check_grashof_condition: # (这是你在README 中提到的)
+        enable: true
+        weight: 0.5
