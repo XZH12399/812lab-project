@@ -1,142 +1,156 @@
 # configs/default_config.yaml
 
 project_name: "GenRLMechSyn"
-timestamp: "20251023"
+timestamp: "20251127"
 
-# --- 数据集设置 ---
+# --- 1. 数据集设置 ---
 data:
-  initial_manifest_path: "data/initial_dataset/metadata.json"
+  # 初始数据集 (建议指向你新生成的 2-DOF 8-Bar 数据集)
+  initial_manifest_path: "data/initial_2dof_dataset/metadata.json"
+  # 增强数据集 (用于存放生成并通过评估的高分机构)
   augmented_manifest_path: "data/augmented_dataset/metadata.json"
-  max_nodes: 6 # 用于张量填充, 必须与 diffusion_model.img_size 一致
-  
-  # --- 按通道设置归一化最大值 ---
-  # 扩散模型在 [-1, 1] 范围内工作效果最好
-  # exists: 0/1   -> -1/1 (由代码硬编码)
-  # a:      [0, a_max]     -> [-1, 1]
-  # alpha:  [0, alpha_max] -> [-1, 1]
-  # d:      [0, d_max]     -> [-1, 1]
+
+  # [关键] 最大节点数 (对于 8杆机构必须设为 8)
+  max_nodes: 8
+
+  # 全局标签映射表
+  #在此处统一定义所有支持的机构类型及其 ID
+  label_mapping:
+    "bennett": 0
+    "general_2dof": 1
+    # 未来可以添加: "rccc": 2, "spherical": 3 ...
+
+  # 归一化参数 (按物理最大值设定)
   normalization_values:
-    a: 20.0       # 假设连杆长度 a 最大为 20.0
-    alpha: 1.5708 # (pi/2) 扭转角的物理最大值
-    d: 20.0       # 假设偏移量 d 最大为 20.0
+    a: 20.0       # 连杆长度最大值
+    alpha: 3.1416 # 扭转角最大值 (pi)
+    d: 20.0       # 偏移量最大值
 
-# --- 训练参数 ---
+# --- 2. 训练参数 ---
 training:
-  # --- DiT 预热阶段 ---
-  dit_warmup_epochs: 50    # DiT 预热训练轮次 (仅在随机初始化时执行)
-                             # 对于小数据集(10个样本), 建议 100-200 轮
-                             # 设为 0 则跳过预热
-  # --- RL 预热阶段 ---
-  rl_warmup_epochs: 50     # 在主循环前, RL Agent 在初始数据集上训练多少"轮"
-                            # (每轮会训练 5 个 epoch, 见 agent.py)
-                            # 设为 0 则跳过
+  # DiT 预热 (建议 50-100 轮)
+  dit_warmup_epochs: 50
+  # RL 预热
+  rl_warmup_epochs: 50
 
-  # --- 主循环参数 ---
-  num_cycles: 300            # 总共进行多少轮"生成-增强"循环 (小数据集减少循环次数)
-  epochs_per_cycle: 50      # 每个循环中, 扩散模型训练多少个 epoch (小数据集减少训练轮次)
-  batch_size: 8             # 数据集小, 批次大小改为 8 (避免过拟合)
+  # 主循环
+  num_cycles: 300
+  epochs_per_cycle: 50
+  batch_size: 8
+
   learning_rate: 0.0001
   rl_learning_rate: 0.00001
-  device: "cuda"            # 如果有NVIDIA GPU, 使用 "cuda", 否则使用 "cpu"
 
-  replay_buffer_limit: 10000  # Replay Buffer 最大容量
+  device: "cuda"
+  replay_buffer_limit: 10000
+  random_seed: 42
 
-  # --- 模型保存与加载 ---
-  save_checkpoint_path: "checkpoints/training_checkpoint.pth" # 保存权重到这个文件
-  load_checkpoint_path: null # 默认不加载 (设为 "checkpoints/training_checkpoint.pth" 来加载)
+  # 检查点保存
+  save_checkpoint_path: "checkpoints/training_checkpoint.pth"
+  load_checkpoint_path: null # 设为路径以恢复训练
 
-  enable_rl_guidance: true   # true: RLAgent 会引导 DiT 采样
-                             # false: 纯 DiT 采样 (guidance_fn = None)
-  enable_augmentation: false  # true: 高分机构会被保存到 augmented_dataset
-                             # false: 数据集不会被扩充
+  # 开关
+  enable_rl_guidance: true
+  enable_augmentation: true
 
-  random_seed: 42 # 添加随机数种子
-
-# --- 模型参数 (DiT) ---
+# --- 3. 扩散模型参数 (DiT) ---
 diffusion_model:
-  # 数据/Patch 形状
-  img_size: 6       # 必须与 data.max_nodes 一致
-  patch_size: 2      # 30 % 5 == 0
-  in_channels: 5     # 新: [exists, joint_type, a, alpha, d]
-  
-  # Transformer 架构
-  embed_dim: 768     # Transformer 隐藏层维度
-  depth: 12          # Transformer 块 (blocks) 的数量
-  num_heads: 12        # 注意力头的数量
-  
-  # 扩散过程
+  # 图像尺寸必须与 data.max_nodes 一致
+  img_size: 8
+  patch_size: 2      # 8 可以被 2 整除
+  in_channels: 5     # [exists, joint_type, a, alpha, offset]
+
+  embed_dim: 768
+  depth: 12
+  num_heads: 12
+
   timesteps: 1000
-  schedule_type: "cosine" # 推荐 'cosine', 备选 'linear'
+  schedule_type: "cosine"
 
-  # --- 添加类别数量 ---
-  num_classes: 1 # 目前只有一个类别 "bennett"
+  # 类别数 (0: Bennett, 1: General 2-DOF)
+  num_classes: 2
 
-# --- 新增 Solver 配置 ---
-solver:
-  max_iterations: 30   # 增加迭代次数以提高成功率
-  step_size: 0.8       # 稍微保守一点的步长
-
-# --- 生成与评估 ---
+# --- 4. 生成与优化器参数 ---
 generation:
-  num_to_generate: 50   # 每个循环生成多少个新机构 (小数据集减少生成数量)
-  acceptance_threshold: 1.98 # 评估分数高于此阈值的机构才会被接受
+  num_to_generate: 50
 
-  # 软优化容忍度
-  # 只有 Optimization Loss (闭环+几何) 低于此值的机构，
-  # 才会进入后续的 Evaluator 评分环节，否则直接标记为 FAIL。
-  # 建议设为 0.5 或 1.0 (视 Loss 的量级而定)
-  optimization_tolerance: 0.001
+  # 目标标签索引 (0: bennett, 1: general_2dof)
+  target_label_index: 1
 
-  rl_guidance_scale: 1.0  # (如果 rl_guidance=true, 此缩放才生效)
+  # [优化器] 软优化判定阈值 (Loss低于此值才算 OK)
+  optimization_tolerance: 0.01
 
-  # --- 指定生成时使用的类别索引 ---
-  target_label_index: 0 # 对应 "bennett"
+  # [优化器] 多重启动次数 (应对非凸优化)
+  num_restarts: 1
 
-# --- 评估器配置 (动态奖励函数) ---
+  # [优化器] 末端节点索引 (EE Node)
+  # 指定哪个关节是末端平台的"入口"。
+  # 对于 8-Bar (0->...->7)，通常设为 7。如果不填，默认取 max_nodes - 1。
+#  ee_node: 7
+
+  # Evaluator 的硬性录取分数线 (Score >= threshold 才能进入增强数据集)
+  acceptance_threshold: 3.98
+  rl_guidance_scale: 1.0
+
+# --- 5. 评估器与优化目标配置 ---
 evaluator_config:
-  # R_total = SUM( weight * score_of_function )
-  #
-  # 'enable': (true/false) 是否运行此评估函数
-  # 'weight': (float) 此函数的分数所占的权重
-  #
-  # 注意: 评估器会按此列表的顺序执行。
-  # 关键的 "硬约束" (如连通性) 应该放在最前面。
 
-  # --- 区分“通用”和“特定”指标 ---
-  # 1. 通用指标 (始终运行, 无论标签是什么)
+  # === 通用指标 (适用于所有机构) ===
   common_indicators:
-    check_connectivity:
-      enable: false
-      weight: 1.0
-    check_dof:
-      enable: false
-      weight: 1.0
-    check_node_count_penalty:
-      enable: false
-      weight: 1.0
-      target_nodes: 4
-      node_penalty_scale: 0.05
-    # 新增: 物理求解检查 (最硬核的检查)
+
+    # A. 闭环位置可行性 (最基础要求)
     check_kinematic_feasibility:
       enable: true
-      weight: 1.0  # 给它很高的权重！因为闭环是根本。
+      weight: 1.0
 
-  # 2. 特定标签的指标 (仅在匹配到标签时运行)
+    # B. 可动性检查 (防止死锁)
+    check_mobility:
+      enable: true
+      weight: 1.0
+      threshold: 0.001 # 评估器用的 SVD/Eigen 阈值 (判定是否为0)
+      # 谱间隙阈值 (优化器用)
+      # 强迫第 K+1 个特征值大于此值，防止自由度过多 (秩亏过量)
+      # 建议值: 0.005 ~ 0.01
+      gap_threshold: 0.005
+
+    # C. 任务性能检查 (Task Performance)
+    # [核心] 定义你想要的运动类型 (如 2T, 3T, 1T1R)
+    check_task_performance:
+      enable: true   # 开启后，优化器会寻找满足这些模式的解
+      weight: 1.0    # 强约束权重
+
+      # 目标运动模式列表 (Target Motion Patterns)
+      # 格式: [wx, wy, wz, vx, vy, vz]
+      # 使用数值强制约束，使用 null (None) 表示不关心该维度
+      target_motion_patterns:
+        # 自由度 1: 纯 X 轴移动 (无转动)
+        - [0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+
+        # 自由度 2: 纯 Y 轴移动 (无转动)
+        - [0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+
+    check_global_consistency:
+      enable: true
+      weight: 1.0        # 在 Optimizer 中的权重，以及 Evaluator 评分的权重
+      threshold: 0.05    # Evaluator 中的容忍阈值
+
+  # === 特定标签指标 (仅当 target_label 匹配时生效) ===
   label_specific_indicators:
 
-    # --- Bennett 机构的评估流程 ---
+    # Bennett 机构专用配置
     "bennett":
       check_is_bennett:
-        enable: true
-        weight: 1.0  # R_total = (所有通用指标) + 1.0 * (bennett得分)
-        existence_threshold: 0.05
-        bennett_error_threshold: 0.05
-
-    # --- 平面四杆机构的评估流程 ---
-    "planar_four_bar":
-      check_topology_similarity: # 确保它是一个4杆环
         enable: false
-        weight: 0.5
-      _check_grashof_condition: # (这是你在README 中提到的)
-        enable: true
-        weight: 0.5
+        weight: 1.0 # 优化器中会自动放大 20 倍
+        existence_threshold: 0.05
+        bennett_error_threshold: 0.1
+
+      # 如果是 Bennett 任务，通常不需要 Task Performance (设为 false)
+      # 可以在代码逻辑中自动处理，或者在这里手动覆盖 common_indicators
+
+    # 通用 2自由度机构
+    "general_2dof":
+      # 这里可以添加其他特定检查，目前主要依靠 common_indicators 中的 Task 检查
+      check_topology_similarity:
+        enable: false
+        weight: 0.0

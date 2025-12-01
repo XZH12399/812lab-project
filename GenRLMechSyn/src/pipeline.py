@@ -4,11 +4,12 @@ import os
 import json
 import logging
 import time
+import math                 # [新增]
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
-import math
+import networkx as nx       # [新增]
 
 # 导入所有模块
 from .utils import dataloader
@@ -16,7 +17,15 @@ from .evaluator.evaluator import MechanismEvaluator
 from .diffusion_model.model import DiffusionModel
 from .rl_agent.agent import RLAgent
 from .solver.utils import tensor_to_graph, find_independent_loops
-from .solver.simple_kinematics import compute_loop_errors, compute_bennett_geometry_error
+
+from .solver.simple_kinematics import (
+    compute_loop_errors,
+    compute_bennett_geometry_error,
+    # compute_all_joint_screws, # 这个如果pipeline里不直接用可以去掉
+    compute_mobility_loss_eigen,
+    compute_task_loss_eigen,
+    compute_motion_consistency_loss
+)
 
 
 class TrainingPipeline:
@@ -224,8 +233,9 @@ class TrainingPipeline:
 
     def load_replay_buffer(self):
         """
-        (已更新!) 从 augmented_dataset 加载经验。
-        (新!) 自动检测 6 列 (旧) 和 8 列 (新) 的 .npz 格式.
+        从 augmented_dataset 加载经验。
+        自动检测 6 列 (旧) 和 8 列 (新) 的 .npz 格式.
+        [修复] 从 config 读取 label_mapping，解决 'general_2dof' 未知错误。
         """
         self.logger.info("正在加载 Replay Buffer (来自 augmented_dataset)...")
         manifest_path = os.path.join(self.project_root, self.config['data']['augmented_manifest_path'])
@@ -243,7 +253,10 @@ class TrainingPipeline:
             return []
 
         experiences = []
-        label_map = {"bennett": 0}  # (保持简单)
+
+        # 从配置读取标签映射，而不是硬编码
+        # 这样 pipeline 就能认识 'general_2dof' 了
+        label_map = self.config['data'].get('label_mapping', {"bennett": 0})
 
         for entry in manifest:
             npz_path = os.path.join(data_dir, entry['data_path'])
@@ -251,11 +264,12 @@ class TrainingPipeline:
                 # --- 检查标签 ---
                 label_str = entry.get('metadata', {}).get('label')
                 if label_str is None:
-                    self.logger.warning(f"警告: 条目 {entry['id']} 缺少标签, 跳过。")
-                    continue
+                    # 兼容旧数据，如果没标签默认当 bennett
+                    label_str = "bennett"
+
                 label_idx = label_map.get(label_str, -1)
                 if label_idx == -1:
-                    self.logger.warning(f"警告: 条目 {entry['id']} 标签 '{label_str}' 未知, 跳过。")
+                    self.logger.warning(f"警告: 条目 {entry['id']} 标签 '{label_str}' 未知 (Config中未定义), 跳过。")
                     continue
 
                 with np.load(npz_path) as data:
@@ -267,38 +281,28 @@ class TrainingPipeline:
 
                     # 像 Dataloader 一样动态构建稠密张量
                     max_nodes = self.config['data']['max_nodes']
-                    # (新!) 通道数更新为 5
                     num_features = self.config['diffusion_model']['in_channels']
                     feature_tensor = np.zeros((max_nodes, max_nodes, num_features), dtype=np.float32)
 
                     num_cols = edge_list_array.shape[1] if edge_list_array.ndim == 2 else 0
 
                     for edge_data in edge_list_array:
-                        # --- (新!) 6 列/ 8 列 兼容逻辑 ---
+                        # 兼容 6 列/ 8 列
                         if num_cols == 6:
-                            # (旧格式) [i, k, a, alpha, offset_i, offset_k]
                             i, k, a, alpha, offset_i, offset_k = edge_data
-                            joint_type_i = 1.0  # 假定 R 副
-                            joint_type_k = 1.0  # 假定 R 副
+                            joint_type_i, joint_type_k = 1.0, 1.0
                         elif num_cols == 8:
-                            # (新格式) [i, k, a, alpha, offset_i, offset_k, joint_type_i, joint_type_k]
                             i, k, a, alpha, offset_i, offset_k, joint_type_i, joint_type_k = edge_data
                         else:
-                            continue  # 格式错误
+                            continue
 
                         i, k = int(i), int(k)
                         if i >= max_nodes or k >= max_nodes: continue
 
-                        # 填充 5 个通道: [exists, joint_type, a, alpha, offset]
-                        # 注意：joint_type 应该是节点属性，但在 edge_list 中可能存储在边上
-                        # 这里我们直接填入
                         feature_tensor[i, k] = [1.0, joint_type_i, a, alpha, offset_i]
                         feature_tensor[k, i] = [1.0, joint_type_k, a, alpha, offset_k]
 
-                    # (H, W, C) -> (C, H, W)
                     tensor_unnorm_torch = torch.from_numpy(np.transpose(feature_tensor, (2, 0, 1))).float()
-
-                    # (新!) _normalize 现在处理 5 通道
                     tensor_norm = self._normalize(tensor_unnorm_torch)
                     score = entry.get('metadata', {}).get('score', 0.0)
 
@@ -312,330 +316,371 @@ class TrainingPipeline:
 
     def _generate_and_augment(self, cycle_num, total_cycles):
         """
-        步骤 1 & 2: 生成, 筛选, 软优化(S+Q), 评估, 扩充.
-        (使用纯 PyTorch 软约束优化，替代 Solver)
+        步骤 1 & 2: 生成, 筛选, 软优化, 扩充.
+        (完整版 v2.6: 模块化重构 - 调用 _optimize_mechanism)
         """
         self.logger.info("--- 步骤 1 & 2: 生成, 筛选, 软优化, 扩充 ---")
         self.diffusion_model.eval()
         self.rl_agent.eval()
 
+        # 1. 引导设置
         guidance_fn = None
         if self.enable_rl_guidance:
-            self.logger.info("RL 引导已启用。")
             guidance_fn = self.rl_agent.get_guidance_fn(self.guidance_scale)
-        else:
-            self.logger.info("RL 引导已关闭。将使用纯 DiT 采样。")
 
+        # 2. 生成配置
         num_to_gen = self.config['generation']['num_to_generate']
         target_labels = torch.full((num_to_gen,), self.target_label_index, dtype=torch.long, device=self.device)
 
-        label_map = {0: "bennett", 1: "planar_four_bar"}
-        current_target_label_str = label_map.get(self.target_label_index, "bennett")
+        label_map = self.config['data'].get('label_mapping', {"bennett": 0})
+        idx_to_label = {v: k for k, v in label_map.items()}
+        target_str = idx_to_label.get(self.target_label_index, "unknown")
 
-        eval_config = self.config.get('evaluator_config', {})
+        self.logger.info(f"正在生成 {num_to_gen} 个 '{target_str}' 机构...")
 
-        # A. Bennett 配置
-        label_indicators = eval_config.get('label_specific_indicators', {}).get(current_target_label_str, {})
-        bennett_conf = label_indicators.get('check_is_bennett', {})
-        enable_bennett_opt = bennett_conf.get('enable', False)
-        # 提前计算权重 (如果没配 weight 默认为 1.0，再乘以 20.0 的强化系数)
-        bennett_opt_weight = bennett_conf.get('weight', 1.0) * 20.0
-
-        # B. 闭环配置
-        common_indicators = eval_config.get('common_indicators', {})
-        closure_conf = common_indicators.get('check_kinematic_feasibility', {})
-        enable_closure_opt = closure_conf.get('enable', True)
-
-        # C. 优化容忍度
-        opt_tolerance = self.config['generation'].get('optimization_tolerance', 0.5)
-
-        self.logger.info(f"优化器配置: 闭环={enable_closure_opt}, "
-                         f"Bennett几何={enable_bennett_opt} (Weight={bennett_opt_weight}), "
-                         f"容忍度={opt_tolerance}")
-
-        self.logger.info(f"正在生成 {num_to_gen} 个目标标签为 '{current_target_label_str}' 的机构...")
-
-        # 1. DiT 采样 (获取原始 Tensor)
+        # 3. DiT 采样
         _, batch_x0_norm_pure = self.diffusion_model.sample(
-            num_samples=num_to_gen,
-            y=target_labels,
-            guidance_fn=guidance_fn,
-            guidance_scale=self.guidance_scale
+            num_samples=num_to_gen, y=target_labels,
+            guidance_fn=guidance_fn, guidance_scale=self.guidance_scale
         )
 
-        # ==================================================
-        # 2. --- 拓扑筛选与软优化 (Topology Filter & Soft Opt) ---
-        # ==================================================
-        self.logger.info("正在进行拓扑筛选与软约束优化...")
+        # ==========================================================
+        # 4. 解析优化配置 (打包参数传递给子函数)
+        # ==========================================================
+        gen_conf = self.config['generation']
+        eval_conf = self.config.get('evaluator_config', {})
+        common_conf = eval_conf.get('common_indicators', {})
 
-        new_experiences_for_rl = []
-        good_mechanisms_to_save = []
-        num_satisfying_score = 0
+        # A. 开关配置字典
+        opt_config = {
+            'enable_closure': common_conf.get('check_kinematic_feasibility', {}).get('enable', True),
+            'enable_mobility': common_conf.get('check_mobility', {}).get('enable', True),
+            'enable_task': common_conf.get('check_task_performance', {}).get('enable', False),
+            'enable_consistency': common_conf.get('check_global_consistency', {}).get('enable', False),
+            'enable_bennett': eval_conf.get('label_specific_indicators', {}).get(target_str, {}).get('check_is_bennett',
+                                                                                                     {}).get('enable',
+                                                                                                             False),
+            'num_restarts': gen_conf.get('num_restarts', 5),
+            'tolerance': gen_conf.get('optimization_tolerance', 0.5),
+            'ee_node': gen_conf.get('ee_node', self.config['data']['max_nodes'] - 1),
+            'gap_threshold': common_conf.get('check_mobility', {}).get('gap_threshold', 0.005)
+        }
 
-        # 预处理：转 Numpy 进行图分析
-        # 注意：这里只是临时转一下用来找环，优化还是用 Tensor
-        x_phys_temp = self._unnormalize(batch_x0_norm_pure).detach()  # (B, 5, N, N)
+        # B. 权重配置字典
+        weights = {
+            'mobility': common_conf.get('check_mobility', {}).get('weight', 1.0),
+            'task': common_conf.get('check_task_performance', {}).get('weight', 5.0),
+            'consistency': common_conf.get('check_global_consistency', {}).get('weight', 2.0),
+            'bennett': eval_conf.get('label_specific_indicators', {}).get(target_str, {}).get('check_is_bennett',
+                                                                                              {}).get('weight',
+                                                                                                      1.0) * 20.0
+        }
 
-        # 逐个样本处理 (因为优化过程是针对每个机构独立的)
+        # C. 任务数据字典
+        target_data = {'num_dof': 1, 'twists': None, 'masks': None}
+        if opt_config['enable_task']:
+            raw_patterns = common_conf.get('check_task_performance', {}).get('target_motion_patterns', [])
+            if raw_patterns:
+                target_data['num_dof'] = len(raw_patterns)
+                twists = torch.zeros((len(raw_patterns), 6), device=self.device)
+                masks = torch.zeros((len(raw_patterns), 6), device=self.device)
+                for k, pat in enumerate(raw_patterns):
+                    for d, val in enumerate(pat):
+                        if val is not None:
+                            twists[k, d] = float(val);
+                            masks[k, d] = 1.0
+                target_data['twists'] = twists
+                target_data['masks'] = masks
+
+        self.logger.info(f"优化配置: {opt_config}")
+
+        # ==========================================================
+        # 5. 逐个处理循环
+        # ==========================================================
+        new_experiences = []
+        good_mechanisms = []
+        num_ok = 0
+        x_phys_temp = self._unnormalize(batch_x0_norm_pure).detach()
+
         for i in range(num_to_gen):
-            # --- A. 拓扑筛选 ---
-            # 取出当前样本的结构 (N, N, 5)
-            struct_tensor = x_phys_temp[i].permute(1, 2, 0)
-
-            # 使用 solver.utils 工具建图
-            G = tensor_to_graph(struct_tensor)
+            # A. 拓扑筛选
+            struct_tsr = x_phys_temp[i].permute(1, 2, 0)
+            G = tensor_to_graph(struct_tsr)
             loops = find_independent_loops(G)
 
-            # 只有拓扑合格（有环）的机构才值得优化
-            if not loops:
-                # 没环的直接跳过，不放入 RL 经验池（或者放入低分经验）
-                # 这里选择放入低分经验，让 RL 知道生成无环是不好的
-                score = -1.0
-                new_experiences_for_rl.append((batch_x0_norm_pure[i], score, target_labels[i]))
+            has_valid_loop = False
+            if loops:
+                for loop in loops:
+                    if len(loop) >= 4: has_valid_loop = True; break
+
+            if not has_valid_loop:
+                new_experiences.append((batch_x0_norm_pure[i], -1.0, target_labels[i]))
                 continue
 
-            # ==============================================================
-            # [新增] 2. 检查环路长度 (必须 >= 4)
-            # 三角形 (len=3) 在机构学上是刚性结构，没有任何意义
-            # ==============================================================
-            if len(loops[0]) < 4:
-                # print(f"  > Mech {i+1:02d}: 跳过 (拓扑退化为 {len(loops[0])} 杆结构)")
-                score = -1.0
-                new_experiences_for_rl.append((batch_x0_norm_pure[i], score, target_labels[i]))
-                continue
+            # B. 调用独立优化函数 [核心]
+            x_init = batch_x0_norm_pure[i].unsqueeze(0).detach()
 
-            # --- B. 软约束优化 (Soft Optimization) ---
-            # 目标：同时微调 结构(S) 和 关节(Q) 使得闭环误差最小
+            best_x, best_q, best_metric, init_metric = self._optimize_mechanism(
+                i, x_init, loops, G, opt_config, weights, target_data
+            )
 
-            # 1. 准备优化变量
-            # x_opt: 结构参数 (从 DiT 输出初始化)
-            x_opt = batch_x0_norm_pure[i].unsqueeze(0).detach().clone().requires_grad_(True)
+            # C. 结果判定
+            is_ok = best_metric < opt_config['tolerance']
+            status = "OK" if is_ok else "FAIL"
 
-            # q_opt: 关节参数 (随机初始化)
-            # 初始化在 [-0.5, 0.5] 弧度之间，不要太大
-            q_opt = (torch.randn(self.config['data']['max_nodes'], device=self.device) * 0.5).requires_grad_(True)
+            if (i + 1) % 5 == 0 or i == 0 or is_ok:
+                print(f"  > Mech {i + 1:02d}: {status} (Metric: {init_metric:.4f} -> {best_metric:.6f})")
 
-            # ==========================================================
-            # [核心修正] 强制“硬复位”：在优化开始前，把数值强行按回 [-1, 1]
-            # ==========================================================
+            # D. 评估与打印
+            final_phys = self.diffusion_model.apply_physics_constraints(best_x, clamp=True).detach()
+            final_np = final_phys[0].permute(1, 2, 0).cpu().numpy()
+
+            score = -1.0
+            if is_ok:
+                score = self.evaluator.evaluate(
+                    final_np, target_label=target_str, current_cycle=cycle_num,
+                    total_cycles=total_cycles, optimized_joint_angles=best_q, known_loops=loops
+                )
+
+                # 打印详细报告 (这里可以保持原样，或进一步封装成 helper)
+                print(f"\n  >>> [详细参数报告] Mech {i + 1:02d} (Score: {score:.4f}) <<<")
+                q_vals = best_q.detach().cpu().numpy()
+                if loops:
+                    for loop_idx, path in enumerate(loops):
+                        l_type = "Rigid" if len(path) < 4 else "Kinematic"
+                        print(f"  --- Loop {loop_idx + 1}: {path} ({l_type}) ---")
+                        L = len(path)
+                        for idx, u in enumerate(path):
+                            v = path[(idx + 1) % L];
+                            prev = path[(idx - 1 + L) % L]
+                            p = final_np[u, v]
+                            t_str = "R" if p[1] > 0 else "P"
+                            d_val = p[4] - final_np[u, prev, 4]
+                            print(f"    [{u}|{t_str}] q={q_vals[u]:.4f} --> a={p[2]:.4f}, al={p[3]:.4f}, d={d_val:.4f}")
+                print("-" * 60 + "\n")
+
+            # E. 收集结果
+            new_experiences.append((best_x[0], score, target_labels[i]))
+            if score >= self.acceptance_threshold:
+                num_ok += 1
+                if self.enable_augmentation:
+                    good_mechanisms.append({
+                        "tensor": final_np,
+                        "metadata": {"source": "soft_optimized", "score": score, "label": target_str,
+                                     "closure_error": best_metric}
+                    })
+
+        # F. 结束统计
+        if new_experiences:
+            scores = [e[1] for e in new_experiences]
+            if scores:
+                avg = sum(scores) / len(scores)
+                self.logger.info(f"生成机构平均得分: {avg:.4f} (Min: {min(scores):.4f}, Max: {max(scores):.4f})")
+
+        self.logger.info(f"评估完成. {num_ok} / {num_to_gen} 合格.")
+
+        if self.enable_augmentation and good_mechanisms:
+            self.logger.info(f"数据增强: 保存 {len(good_mechanisms)} 个新机构。")
+            dataloader.add_mechanisms_to_dataset(good_mechanisms,
+                                                 os.path.join(self.project_root,
+                                                              self.config['data']['augmented_manifest_path']))
+
+        return new_experiences
+
+    def _optimize_mechanism(self, mech_idx, x_init_raw, loops, G,
+                            opt_config, weights, target_data):
+        """
+        封装单体机构的完整优化过程 (Multi-Start + Gradient Descent)。
+        包含：初始化、正向计算、Loss(闭环/Bennett/可动性/任务/一致性)、反向传播、投影梯度。
+
+        Args:
+            mech_idx: 当前机构的索引 (用于控制日志打印频率)
+            x_init_raw: DiT 生成的原始结构张量 (未归一化)
+            loops: 独立回路列表
+            G: 拓扑图 (NetworkX)
+            opt_config: 包含 num_restarts, tolerance, max_nodes, ee_node, enable_consistency 等配置的字典
+            weights: 包含各 Loss 权重的字典
+            target_data: 包含 target_twists, target_masks, num_dof 等任务数据的字典
+
+        Returns:
+            best_x, best_q, best_metric, initial_metric
+        """
+
+        # 1. 解包配置
+        NUM_RESTARTS = opt_config['num_restarts']
+        max_nodes = self.config['data']['max_nodes']
+
+        # 解包开关
+        enable_closure = opt_config['enable_closure']
+        enable_mobility = opt_config['enable_mobility']
+        enable_task = opt_config['enable_task']
+        enable_bennett = opt_config['enable_bennett']
+
+        # [新增] 获取一致性开关 (默认关闭以防旧配置报错)
+        enable_consistency = opt_config.get('enable_consistency', False)
+
+        # 记录全局最优 (Across Restarts)
+        best_metric_global = float('inf')
+        best_x_global = None
+        best_q_global = None
+        initial_metric_log = 0.0
+
+        # [新增] 预计算末端路径 (用于一致性 Loss)
+        # 一致性检查需要知道从 Base 到 EE 的路径
+        path_to_ee = []
+        if enable_consistency:
+            try:
+                graph_nodes = list(G.nodes())
+                if graph_nodes:
+                    base_node = min(graph_nodes)
+                    # 获取配置的 EE 节点，如果不存在则使用最大节点索引
+                    config_ee = opt_config.get('ee_node', -1)
+                    if config_ee in graph_nodes:
+                        final_ee = config_ee
+                    else:
+                        final_ee = max(graph_nodes)
+
+                    path_to_ee = nx.shortest_path(G, source=base_node, target=final_ee)
+            except Exception as e:
+                # 如果找不到路径（例如图不连通），则无法计算一致性
+                path_to_ee = []
+
+        # 2. 多重启动循环
+        for attempt in range(NUM_RESTARTS):
+
+            # --- 2.1 初始化变量 ---
+            # x_opt: 从 DiT 初值克隆 (保证起点一致)
+            x_opt = x_init_raw.clone().requires_grad_(True)
+            # q_opt: 全局均匀随机 [-pi, pi]
+            q_opt = torch.empty(max_nodes, device=self.device).uniform_(-math.pi, math.pi).requires_grad_(True)
+
+            # 强制初始化合法 (防退化)
             with torch.no_grad():
-                # 1. 强制所有通道归一化值在 [-1, 1] 之间
-                # 这样解归一化后的物理值绝不会超过 config 中定义的最大值 (如 20.0)
                 x_opt.clamp_(-1.0, 1.0)
+                # 强制杆长 a (通道2) > -0.95 (物理值 > 0.5)
+                x_opt[:, 2, :, :] = torch.clamp(x_opt[:, 2, :, :], min=-0.95)
 
-                # 2. (可选) 更进一步，把几何参数 (通道2,3,4) 初始化得更小一点
-                # 相当于告诉优化器：“先别管 DiT 生成的长短，先从短杆开始修”
-                # 通道: 0:exists, 1:type, 2:a, 3:alpha, 4:offset
-                # 我们把 a 和 offset (归一化后) 缩小到 [-0.1, 0.1] 附近
-                # 这样初始物理长度大约是 2.0 左右，误差大概在几十，而不是几十亿
-                x_opt[:, 2:] = x_opt[:, 2:] * 0.1
-
-            # 2. 定义优化器 (Adam)
-            # 结构参数 LR 小一点(微调)，关节参数 LR 大一点(寻找解)
             optimizer = optim.Adam([
                 {'params': x_opt, 'lr': 0.005},
                 {'params': q_opt, 'lr': 0.05}
             ])
 
-            best_loss_for_this_mech = float('inf')
-            best_x_final = x_opt.detach().clone()
-            best_q_final = None
+            # 单次 attempt 的最优记录
+            best_metric_local = float('inf')
+            best_x_local = x_opt.detach().clone()
+            best_q_local = q_opt.detach().clone()
 
-            # [打印] 记录初始状态 (为了对比优化效果)
-            initial_loss_val = float('inf')
-
-            # 3. 优化循环 (200步)
-            for step in range(200):
+            # --- 2.2 梯度下降循环 (100步) ---
+            for step in range(100):
                 optimizer.zero_grad()
 
-                # --- A. 正向计算 ---
-                x_phys = self.diffusion_model.apply_physics_constraints(x_opt, clamp=False)
+                # (a) 正向计算
+                x_phys = self.diffusion_model.apply_physics_constraints(x_opt, clamp=True)
                 structure = x_phys[0].permute(1, 2, 0)
 
-                # --- B. 动态计算 Loss ---
+                current_metric = 0.0
                 loss = 0.0
 
-                # 直接使用循环外定义好的开关变量
-                if enable_closure_opt:
-                    loss_closure = compute_loop_errors(structure, q_opt, loops)
-                    loss += loss_closure
-                else:
-                    loss_closure = torch.tensor(0.0)
+                # (b) Loss 计算
 
-                if enable_bennett_opt:
-                    loss_bennett_geo = compute_bennett_geometry_error(structure, loops)
-                    # 直接使用循环外计算好的权重
-                    loss += bennett_opt_weight * loss_bennett_geo
-                else:
-                    loss_bennett_geo = torch.tensor(0.0)
+                # 1. 闭环 Loss
+                if enable_closure:
+                    loss_c = compute_loop_errors(structure, q_opt, loops)
+                    loss += loss_c
+                    current_metric += loss_c.item()
 
-                # 3. 边界与正则 Loss (始终开启，防止数值爆炸)
+                # 2. Bennett Loss
+                if enable_bennett:
+                    loss_b = compute_bennett_geometry_error(structure, loops)
+                    loss += weights['bennett'] * loss_b
+                    current_metric += loss_b.item()
+
+                # 3. 可动性 Loss (Eigen-Loss)
+                loss_m = torch.tensor(0.0, device=self.device)
+                if enable_mobility:
+                    loss_m = compute_mobility_loss_eigen(
+                        structure, q_opt, loops, num_dof=target_data['num_dof'],
+                        gap_threshold=opt_config['gap_threshold']
+                    )
+                    loss += weights['mobility'] * loss_m
+                    current_metric += loss_m.item()
+
+                # 4. 任务 Loss (Eigen-Loss)
+                loss_t = torch.tensor(0.0, device=self.device)
+                if enable_task:
+                    ee_idx = opt_config['ee_node']
+                    loss_t = compute_task_loss_eigen(
+                        structure, q_opt, loops, G, ee_idx,
+                        target_data['twists'], target_data['masks']
+                    )
+                    loss += weights['task'] * loss_t
+                    current_metric += loss_t.item()
+
+                # [修改] 5. 全周一致性 Loss (Consistency Loss)
+                loss_cons = torch.tensor(0.0, device=self.device)
+                if enable_consistency and path_to_ee:
+                    # 直接使用 target_data 中的完整数据
+                    # 如果没有任务数据，传入 None，函数内部会自动处理
+                    tgt_twists = None
+                    tgt_masks = None
+
+                    if enable_task and target_data.get('twists') is not None:
+                        tgt_twists = target_data['twists']  # (K, 6)
+                        tgt_masks = target_data['masks']  # (K, 6)
+
+                    loss_cons = compute_motion_consistency_loss(
+                        structure, q_opt, loops, path_to_ee,
+                        target_twists=tgt_twists, target_masks=tgt_masks  # <--- 传入完整列表
+                    )
+
+                    w_cons = weights.get('consistency', 2.0)
+                    loss += w_cons * loss_cons
+                    current_metric += loss_cons.item()
+
+                # (c) Snapshot (在 Backward 之前记录)
+                if step == 0 and attempt == 0: initial_metric_log = current_metric
+
+                if current_metric < best_metric_local:
+                    best_metric_local = current_metric
+                    best_x_local = x_opt.detach().clone()
+                    best_q_local = q_opt.detach().clone()
+
+                # (d) 辅助 Loss (边界 + 正则)
                 _, _, a, alpha, offset = torch.chunk(x_phys, 5, dim=1)
+                loss_bounds = torch.relu(-a).sum() + \
+                              torch.relu(0.5 - a).sum() * 50.0 + \
+                              torch.relu(torch.abs(offset) - 25.0).sum()
+                loss += 10.0 * loss_bounds
 
-                loss_bounds = 0.0
-                loss_bounds += torch.relu(-a).sum()
-                loss_bounds += torch.relu(0.5 - a).sum() * 50.0  # 防退化
-                loss_bounds += torch.relu(torch.abs(offset) - 25.0).sum()
-
-                reg_loss = 0.01 * (q_opt ** 2).mean() + 0.01 * (offset ** 2).mean()
-
-                loss += 10.0 * loss_bounds + 1.0 * reg_loss
-
-                # --- C. 记录最优解 ---
-                # 此时的 loss_closure 和 loss_bennett_geo 都是计算好的
-                # 我们用它们的和作为衡量标准 (如果开启的话)
-
-                current_metric = 0.0
-                if enable_closure_opt: current_metric += loss_closure.item()
-                if enable_bennett_opt: current_metric += loss_bennett_geo.item()
-
-                if step == 0: initial_loss_val = current_metric
-
-                if current_metric < best_loss_for_this_mech:
-                    best_loss_for_this_mech = current_metric
-                    best_x_final = x_opt.detach().clone()
-                    best_q_final = q_opt.detach().clone()
-
-                # --- D. 更新 ---
+                # (e) 更新
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_([x_opt, q_opt], max_norm=1.0)
                 optimizer.step()
 
-                # --- E. 投影修正 ---
+                # (f) 投影 (Projected Gradient)
                 with torch.no_grad():
                     x_opt.data.clamp_(-1.0, 1.0)
                     x_opt.data[:, 2, :, :].clamp_(min=-0.95)
                     q_opt.data.clamp_(-math.pi, math.pi)
 
-                # --- F. 调试打印 ---
-                if i == 0 and (step == 0 or (step + 1) % 10 == 0):
-                    print(f"  [Debug Mech 0] Step {step + 1:02d}/50 | "
-                          f"Total: {loss.item():.2f} | "
-                          f"Metric: {current_metric:.4f} | "
-                          f"GeoLoss: {loss_bennett_geo.item():.4f}")
+                # (g) 调试打印 (仅打印第一个样本的第一次尝试)
+                if mech_idx == 0 and attempt == 0 and (step == 0 or (step + 1) % 20 == 0):
+                    # 动态生成日志字符串，如果有新 Loss 则显示
+                    log_str = (f"  [Debug Mech 0] Step {step + 1:03d}/100 | "
+                               f"Total: {loss.item():.2f} | Metric: {current_metric:.4f} | "
+                               f"M: {loss_m.item():.4f}")
+                    if enable_task: log_str += f" | T: {loss_t.item():.4f}"
+                    if enable_consistency: log_str += f" | C: {loss_cons.item():.4f}"
+                    print(log_str)
 
-            # --- [新增] 打印每个机构的最终优化结果 ---
-            status = "OK" if best_loss_for_this_mech < opt_tolerance else "FAIL"
+            # --- 2.3 更新全局最优 ---
+            if best_metric_local < best_metric_global:
+                best_metric_global = best_metric_local
+                best_x_global = best_x_local
+                best_q_global = best_q_local
+                if best_metric_global < 1e-4: break
 
-            # 修正逻辑：如果是第1个，或者整除5，或者状态是 OK，都打印
-            # 这样保证了每一个成功的机构都会先打印这一行 summary，再打印下面的详细参数
-            if (i + 1) % 5 == 0 or i == 0 or status == "OK":
-                print(f"  > Mech {i + 1:02d}/{num_to_gen}: {status} "
-                      f"(Loss: {initial_loss_val:.4f} -> {best_loss_for_this_mech:.6f})")
-
-            # --- C. 评估与保存 ---
-
-            final_phys = self.diffusion_model.apply_physics_constraints(best_x_final, clamp=True).detach()
-            final_np = final_phys[0].permute(1, 2, 0).cpu().numpy()
-
-            if best_loss_for_this_mech < opt_tolerance:
-                score = self.evaluator.evaluate(
-                    final_np,
-                    target_label=current_target_label_str,
-                    current_cycle=cycle_num,
-                    total_cycles=total_cycles,
-                    optimized_joint_angles=best_q_final,
-                    known_loops=loops
-                )
-                # =========================================================
-                # [新增] 打印详细参数 (包含 Joint Type 和 DH参数 d)
-                # =========================================================
-                print(f"\n  >>> [详细参数报告] Mech {i + 1:02d} (Score: {score:.4f}) <<<")
-
-                # 1. 打印非结构参数 (关节变量 q)
-                q_vals = best_q_final.detach().cpu().numpy()
-
-                # 2. 打印结构参数 (沿着环路打印)
-                if loops and len(loops) > 0:
-                    path = loops[0]  # 取主环路
-                    print(f"  环路路径: {path}")
-
-                    L = len(path)
-                    for idx, node_u in enumerate(path):
-                        node_v = path[(idx + 1) % L]  # 下一个节点 (出边)
-                        node_prev = path[(idx - 1 + L) % L]  # 上一个节点 (入边)
-
-                        # 获取参数
-                        # final_np shape: (N, N, 5) -> [u, v, :]
-                        params = final_np[node_u, node_v]
-
-                        j_type_val = params[1]
-                        type_str = "R" if j_type_val > 0 else "P"
-
-                        a_val = params[2]
-                        alpha_val = params[3]
-
-                        # --- [核心修改] 计算 DH 参数 d (相对偏移量) ---
-                        # offset_out: 当前关节 u 连接到下一关节 v 的接口位置
-                        offset_out = params[4]
-                        # offset_in:  当前关节 u 连接到上一关节 prev 的接口位置
-                        offset_in = final_np[node_u, node_prev, 4]
-
-                        # d = out - in
-                        d_val = offset_out - offset_in
-
-                        # 获取关节变量
-                        q_val = q_vals[node_u]
-
-                        # 打印: 显示计算后的 d 而不是原始 offset
-                        print(f"    [Joint {node_u} | {type_str}] q={q_val:8.4f}  -->  "
-                              f"[Link {node_u}-{node_v}] a={a_val:8.4f}, "
-                              f"alpha={alpha_val:8.4f}, d={d_val:8.4f}")  # 这里打印 d
-                else:
-                    print("  (警告: 未找到有效环路，无法打印连杆参数)")
-                print("  " + "-" * 60 + "\n")
-            else:
-                score = -1.0
-
-            # --- [修正 2] 使用 best_x_final ---
-            new_experiences_for_rl.append(
-                (best_x_final[0], score, target_labels[i])
-            )
-
-            if score >= self.acceptance_threshold:
-                num_satisfying_score += 1
-                if self.enable_augmentation:
-                    new_entry = {
-                        "tensor": final_np,
-                        "metadata": {
-                            "source": "soft_optimized",
-                            "generation_cycle": cycle_num + 1,
-                            "score": score,
-                            "label": current_target_label_str,
-                            # --- [修正 3] 使用 best_loss_for_this_mech ---
-                            "closure_error": best_loss_for_this_mech
-                        }
-                    }
-                    good_mechanisms_to_save.append(new_entry)
-
-        # ==================================================
-        # 3. 日志与保存逻辑 (保持原样)
-        # ==================================================
-
-        if new_experiences_for_rl:
-            all_scores = [exp[1] for exp in new_experiences_for_rl]
-            avg_score = sum(all_scores) / len(all_scores)
-            min_score = min(all_scores)
-            max_score = max(all_scores)
-            self.logger.info(f"生成机构平均得分: {avg_score:.4f} (Min: {min_score:.4f}, Max: {max_score:.4f})")
-        else:
-            avg_score = None
-
-        self.logger.info(
-            f"评估完成. {num_satisfying_score} / {num_to_gen} 个机构满足分数要求...")
-
-        if self.enable_augmentation:
-            if good_mechanisms_to_save:
-                self.logger.info(f"数据增强已启用。正在保存 {len(good_mechanisms_to_save)} 个机构...")
-                dataloader.add_mechanisms_to_dataset(good_mechanisms_to_save,
-                                                     os.path.join(self.project_root, self.config['data'][
-                                                         'augmented_manifest_path']))
-            else:
-                self.logger.info("数据增强已启用, 但没有合格的机构可保存。")
-        else:
-            self.logger.info("数据增强已关闭。跳过保存。")
-
-        return new_experiences_for_rl
+        return best_x_global, best_q_global, best_metric_global, initial_metric_log
 
     def _train_rl_agent(self, new_experiences):
         if not self.enable_rl_guidance:
