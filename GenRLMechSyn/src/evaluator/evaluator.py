@@ -15,8 +15,13 @@ from ..solver.utils import tensor_to_graph, find_independent_loops
 from ..solver.simple_kinematics import (
     compute_loop_errors,
     compute_bennett_geometry_error,
-    compute_all_joint_screws, # <--- 确保导入这个
-    compute_motion_consistency_loss  # <--- [新增] 添加这个导入
+    compute_all_joint_screws,
+    # [新增/确认] 导入升级后的核心函数
+    solve_anchor_system,
+    compute_mobility_loss_eigen,
+    compute_task_loss_eigen,
+    _build_extended_path,
+    compute_motion_consistency_loss
 )
 
 
@@ -136,8 +141,6 @@ class MechanismEvaluator:
             return nx.Graph()
         return G_main
 
-    # ( ... _get_error_score, _calculate_DoF, _check_connectivity, _check_dof,
-    #   _check_topology_similarity, _check_node_count_penalty ... 均不变)
     def _get_error_score(self, error_value, threshold):
         if threshold < 1e-6:
             return 1.0 if error_value < 1e-6 else -1.0
@@ -217,8 +220,8 @@ class MechanismEvaluator:
 
     def _check_kinematic_feasibility(self, G, tensor, conf, optimized_joint_angles=None, known_loops=None, **kwargs):
         """
-        检查运动学可行性。
-        如果提供了 known_loops，直接使用它，确保与优化时的路径一致。
+        检查运动学可行性 (闭环误差)。
+        [修改版] 适配 Anchor Velocity 理论，优先使用优化后的锚点矩阵计算误差。
         """
         # =======================================================
         # 模式 A: 极速模式 (使用 Pipeline 传入的优化结果)
@@ -228,34 +231,32 @@ class MechanismEvaluator:
                 device = optimized_joint_angles.device
                 structure_tensor = torch.tensor(tensor, dtype=torch.float32, device=device)
 
-                # [核心修改] 优先使用传入的 loops
+                # [核心修改] 优先使用传入的 loops (保证拓扑一致)
                 if known_loops is not None:
                     loops = known_loops
                 else:
-                    # 只有没传的时候才自己找 (可能方向不一致)
+                    # 只有没传的时候才自己找 (可能导致环路定义不一致)
                     loops = find_independent_loops(G)
 
                 if not loops:
                     return -1.0
 
                 # 3. 复用 simple_kinematics 计算误差
-                # 这保证了 Evaluator 看到的误差和 Pipeline 优化时的误差逻辑一致
+                # 注意: compute_loop_errors 已经更新为支持 (N, N) 锚点矩阵
                 closure_error = compute_loop_errors(structure_tensor, optimized_joint_angles, loops)
 
-                # (兼容性处理) 防止 compute_loop_errors 返回元组 (loss, mobility_loss)
+                # (兼容性处理) 防止未来函数签名变更返回元组
                 if isinstance(closure_error, tuple):
                     closure_error = closure_error[0]
 
                 final_err = closure_error.item()
 
                 # --- [调试信息] 打印真实的误差值 ---
-                # 这能让你看到 Evaluator 到底算出了多少误差
                 print(f"    [Evaluator] 闭环误差检查: {final_err:.6f}")
 
                 # 4. [关键] 阈值判定
-                # 建议放宽到 2.0，容忍一些因为截断(Clamp)带来的微小几何变动。
-                # 只要误差在这个范围内，说明机构是基本闭环的。
-                THRESHOLD = 0.1
+                # THRESHOLD = 0.1 是一个比较严格但合理的物理闭合标准
+                THRESHOLD = 0.01
 
                 if final_err > THRESHOLD:
                     print(f"    [Evaluator] 失败: 误差 {final_err:.6f} > {THRESHOLD}")
@@ -274,6 +275,8 @@ class MechanismEvaluator:
         # 模式 B: 回退模式 (使用 Solver 从零求解)
         # =======================================================
         # 仅当 optimized_joint_angles 未提供或出错时使用
+        # 注意: 如果您的 self.solver (TheseusLayer) 还没适配锚点理论，这里可能会报错
+        # 建议主要依赖模式 A
 
         if self.solver is None:
             return 0.0
@@ -281,26 +284,32 @@ class MechanismEvaluator:
         # 准备数据: Solver 期望 (B, C, H, W) 格式
         tensor_torch = torch.tensor(tensor, dtype=torch.float32, device=self.device).permute(2, 0, 1).unsqueeze(0)
 
-        with torch.no_grad():
-            # 这里的 solver 是 Theseus Layer (如果已加载)
-            solved_q, success, error = self.solver(tensor_torch)
+        try:
+            with torch.no_grad():
+                # 这里的 solver 是 Theseus Layer (如果已加载)
+                solved_q, success, error = self.solver(tensor_torch)
 
-        final_err = error.item()
+            final_err = error.item()
 
-        # 打印调试信息
-        print(f"    [Evaluator] Solver 求解误差: {final_err:.6f}")
+            # 打印调试信息
+            print(f"    [Evaluator] Solver 求解误差: {final_err:.6f}")
 
-        if final_err > 2.0:  # 同样使用放宽的阈值
-            return -1.0
+            if final_err > 2.0:  # 同样使用放宽的阈值
+                return -1.0
 
-        return 1.0 * np.exp(-2.0 * final_err)
+            return 1.0 * np.exp(-2.0 * final_err)
+
+        except Exception as e:
+            print(f"    [Evaluator] Solver 回退模式失败: {e}")
+            return 0.0
 
     def _check_mobility(self, G, tensor, conf, optimized_joint_angles=None, known_loops=None, **kwargs):
         """
-        [智能推断版] 检查机构可动性。
-        自动根据 target_motion_patterns 的数量推断目标自由度 K。
+        [修改版] 检查机构可动性。
+        日志优化：不再打印前 N 个规范自由度，只打印物理自由度对应的特征值。
         """
         if optimized_joint_angles is None: return 0.0
+
         if known_loops is None:
             loops = find_independent_loops(G)
         else:
@@ -309,62 +318,56 @@ class MechanismEvaluator:
 
         device = optimized_joint_angles.device
         structure = torch.tensor(tensor, dtype=torch.float32, device=device)
+        num_nodes = structure.shape[0]
 
-        # ==========================================================
-        # [核心修改] 自动推断目标自由度 (Target DOF)
-        # ==========================================================
-        # 1. 尝试从 check_task_performance 中获取模式列表
+        # 1. 确定目标自由度
         task_conf = self.config.get('evaluator_config', {}).get('common_indicators', {}).get('check_task_performance',
                                                                                              {})
         patterns = task_conf.get('target_motion_patterns', [])
 
         if patterns and len(patterns) > 0:
-            # 如果定义了任务模式，自由度必须匹配模式数量 (例如 2T -> 2)
             target_dof = len(patterns)
         else:
-            # 2. 如果没定义任务(例如 Bennett)，回退到显式配置或默认值 1
-            target_dof = self.config['generation'].get('target_dof', 1)
-
-        # ==========================================================
+            target_dof = 1
 
         try:
-            # 1. 计算螺旋
-            base_node = min(G.nodes()) if G.number_of_nodes() > 0 else 0
-            all_screws, _ = compute_all_joint_screws(structure, optimized_joint_angles, base_node=base_node)
+            # 2. 调用求解器获取完整谱 (包含 N 个规范自由度)
+            _, _, _, spectrum = solve_anchor_system(
+                structure, optimized_joint_angles, loops,
+                extended_task_path=None, target_twist=None, target_mask=None,
+                return_spectrum=True
+            )
 
-            # 2. 构建雅可比矩阵 J
-            constraint_rows = []
-            for loop_nodes in loops:
-                J_loop = torch.zeros((6, structure.shape[0]), device=device)
-                for node_idx in loop_nodes:
-                    J_loop[:, node_idx] = all_screws[node_idx]
-                constraint_rows.append(J_loop)
+            if spectrum is None: return 0.0
 
-            J_global = torch.cat(constraint_rows, dim=0)
+            # 3. [日志优化] 剔除前 N 个规范自由度
+            # Anchor 理论中，前 num_nodes 个特征值必然是 0 (对应节点平移)，对用户无意义
+            # 我们只关心后面的部分
+            physical_spectrum = spectrum[num_nodes:]
 
-            # 3. 构建 Gram 矩阵
-            G_mat = J_global.T @ J_global
+            # 现在我们的目标是：physical_spectrum 的前 target_dof 个值接近 0
 
-            # 4. 特征值分解
-            eigenvalues = torch.linalg.eigvalsh(G_mat)
-
-            # 5. 检查第 K 个特征值 (索引 K-1)
+            # 索引保护
             check_index = target_dof - 1
-            if check_index >= len(eigenvalues):
-                check_index = len(eigenvalues) - 1
+            if check_index >= len(physical_spectrum):
+                check_index = len(physical_spectrum) - 1
 
-            critical_eig = eigenvalues[check_index]
+            # 关键特征值 (用于评分)
+            critical_eig = physical_spectrum[check_index]
 
-            # 打印前几个特征值供观察
-            display_count = min(len(eigenvalues), target_dof + 2)
-            eigs_str = ", ".join([f"{e:.6f}" for e in eigenvalues[:display_count]])
-            print(f"    [Evaluator] Mobility Eigenvalues (Target DOF={target_dof}): [{eigs_str}]")
+            # --- [优化后的打印] ---
+            # 只显示物理相关的特征值
+            display_count = min(len(physical_spectrum), target_dof + 2)
+            eigs_str = ", ".join([f"{e:.6f}" for e in physical_spectrum[:display_count]])
 
-            # 6. 评分
+            print(f"    [Evaluator] Physical Mobility (Target DOF={target_dof}): [{eigs_str}, ...]")
+
+            # 4. 评分
             threshold = conf.get('threshold', 1e-3)
 
             if critical_eig.item() > threshold:
-                return 0.0  # 自由度不足
+                # print(f"    [Evaluator] 自由度不足: {critical_eig.item():.6f} > {threshold}")
+                return 0.0
 
             return 1.0 * np.exp(-100.0 * critical_eig.item())
 
@@ -374,106 +377,95 @@ class MechanismEvaluator:
 
     def _check_task_performance(self, G, tensor, conf, optimized_joint_angles=None, known_loops=None, **kwargs):
         """
-        [统一版] 任务性能检查 (增广 Gram 矩阵法)。
-        通过构建 [J_path | Target] 的增广矩阵并计算其最小特征值，
-        验证机构是否能在物理上精确执行目标运动模式 (Masked)。
+        [修改版] 任务性能检查 (适配 Anchor Velocity).
+        修正：取第 N+1 个特征值作为任务残差 (剔除 N 个规范自由度)。
         """
-        # 1. 基础依赖检查
         if optimized_joint_angles is None: return 0.0
         if known_loops is None:
             loops = find_independent_loops(G)
         else:
             loops = known_loops
-        if not loops: return 0.0
 
-        # 获取目标配置
         target_patterns = conf.get('target_motion_patterns', [])
-        if not target_patterns: return 1.0  # 无目标默认通过
+        if not target_patterns: return 1.0
+
+        device = optimized_joint_angles.device
+        structure = torch.tensor(tensor, dtype=torch.float32, device=device)
+        num_nodes = structure.shape[0]
+
+        # 确定路径
+        graph_nodes = list(G.nodes())
+        if not graph_nodes: return 0.0
+        base_node = min(graph_nodes)
+        config_ee = self.config.get('generation', {}).get('ee_node', -1)
+        ee_node = config_ee if config_ee in graph_nodes else max(graph_nodes)
 
         try:
-            device = optimized_joint_angles.device
-            structure = torch.tensor(tensor, dtype=torch.float32, device=device)
+            raw_path = nx.shortest_path(G, source=base_node, target=ee_node)
+        except:
+            return 0.0
 
-            graph_nodes = list(G.nodes())
-            if not graph_nodes: return 0.0
+        extended_path = _build_extended_path(structure, raw_path)
+        passed_count = 0
 
-            base_node = min(graph_nodes)
+        for idx, pattern in enumerate(target_patterns):
+            # A. 解析 Pattern
+            row_t = []
+            row_m = []
+            for val in pattern:
+                if val is not None and str(val).lower() != 'none':
+                    row_t.append(float(val))
+                    row_m.append(1.0)
+                else:
+                    row_t.append(0.0)
+                    row_m.append(0.0)
 
-            # 获取配置的 ee_node，如果图中不存在，降级为 max(nodes)
-            config_ee = self.config.get('generation', {}).get('ee_node', -1)
-            if config_ee in graph_nodes:
-                ee_node = config_ee
-            else:
-                ee_node = max(graph_nodes)
+            target_twist = torch.tensor(row_t, device=device, dtype=torch.float32)
+            target_mask = torch.tensor(row_m, device=device, dtype=torch.float32)
 
-            # 2. 计算所有关节的全局螺旋
-            all_screws, _ = compute_all_joint_screws(structure, optimized_joint_angles, base_node=base_node)
+            if not target_mask.any():
+                passed_count += 1
+                continue
 
             try:
-                path_to_ee = nx.shortest_path(G, source=base_node, target=ee_node)
-            except:
-                return 0.0
+                # B. 调用求解器
+                # 注意：min_eig 是 spectrum[0]，对应规范自由度，这里不使用它
+                _, _, _, spectrum = solve_anchor_system(
+                    structure, optimized_joint_angles, loops,
+                    extended_task_path=extended_path,
+                    target_twist=target_twist,
+                    target_mask=target_mask,
+                    return_spectrum=True
+                )
 
-            # J_path_full: (6, M) 每一列是路径上一个关节的螺旋
-            path_screws_list = [all_screws[u] for u in path_to_ee]
-            J_path_full = torch.stack(path_screws_list, dim=1)
+                # [核心修正] 提取真实的物理残差
+                # 目标索引 = num_nodes (即第 N+1 个值)
+                target_idx = num_nodes
 
-            passed_count = 0
+                val = 100.0  # 默认大值
+                display_str = "N/A"
 
-            # 4. 逐个模式检查 (应用 Mask)
-            for idx, pattern in enumerate(target_patterns):
-                # pattern: [wx, wy, wz, vx, vy, vz] (含 None)
+                if spectrum is not None and len(spectrum) > target_idx:
+                    # 取出真正代表任务误差的那个特征值
+                    val = spectrum[target_idx].item()
 
-                # A. 解析 Mask 和 Target
-                valid_indices = []  # 记录哪些维度是有效的 (非 None)
-                target_vals = []
+                    # 为了日志好看，打印从 target_idx 开始的几个值
+                    valid_spectrum = spectrum[target_idx:]
+                    display_str = ", ".join([f"{e:.6f}" for e in valid_spectrum[:5]])
 
-                for dim, val in enumerate(pattern):
-                    if val is not None:
-                        valid_indices.append(dim)
-                        target_vals.append(float(val))
+                status = "OK" if val < 1e-4 else "FAIL"
+                print(f"    [Evaluator] Task {idx + 1} Spectrum (Res={val:.6f}): [{display_str}, ...] ({status})")
 
-                # 如果全为 None，跳过
-                if not valid_indices:
-                    passed_count += 1
-                    continue
-
-                # B. 构建子问题 (Sub-problem)
-                # J_sub: (D_valid, M) 只取关注的行
-                J_sub = J_path_full[valid_indices, :]
-
-                # Target_sub: (D_valid, 1)
-                target_sub = torch.tensor(target_vals, device=device, dtype=torch.float32).unsqueeze(1)
-
-                # C. 构建增广矩阵 [J_sub | Target_sub]
-                # 核心逻辑：如果 Target 在 J_sub 的列空间内（任务可达），
-                # 那么增广矩阵的列向量组必然线性相关。
-                J_aug = torch.cat([J_sub, target_sub], dim=1)
-
-                # D. 计算 Gram 矩阵 G = J_aug.T @ J_aug
-                G_aug = J_aug.T @ J_aug
-
-                # E. 特征值分解 (eigvalsh 针对对称矩阵，数值极稳定)
-                eigenvalues = torch.linalg.eigvalsh(G_aug)
-                min_eig = eigenvalues[0]  # 升序排列，取最小
-
-                print(f"    [Evaluator] 目标 {idx + 1} 增广特征值: {min_eig.item():.8f}")
-
-                # F. 阈值判定
-                # 理论上应为 0。考虑到浮点误差，设定一个较小的阈值。
-                # 注意：这是奇异值的平方，所以比 SVD 的阈值要更敏感。
-                if min_eig.item() < 1e-4:
+                # C. 阈值判定
+                if val < 1e-4:
                     passed_count += 1
 
-            # 5. 评分
-            # 必须所有目标模式都满足才算通过 (2T 需要同时满足两个移动)
-            if passed_count >= len(target_patterns):
-                return 1.0
-            else:
-                return 0.0
+            except Exception as e:
+                print(f"    [Evaluator] Task {idx + 1} Check Error: {e}")
 
-        except Exception as e:
-            print(f"    [Evaluator Task Check Error] {e}")
+        if passed_count >= len(target_patterns):
+            return 1.0
+        else:
             return 0.0
 
     def _check_global_consistency(self, G, tensor, conf, optimized_joint_angles=None, known_loops=None, **kwargs):

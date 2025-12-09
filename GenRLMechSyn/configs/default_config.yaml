@@ -72,7 +72,7 @@ diffusion_model:
 
 # --- 4. 生成与优化器参数 ---
 generation:
-  num_to_generate: 50
+  num_to_generate: 10
 
   # 目标标签索引 (0: bennett, 1: general_2dof)
   target_label_index: 1
@@ -89,7 +89,7 @@ generation:
 #  ee_node: 7
 
   # Evaluator 的硬性录取分数线 (Score >= threshold 才能进入增强数据集)
-  acceptance_threshold: 3.98
+  acceptance_threshold: 2.98
   rl_guidance_scale: 1.0
 
 # --- 5. 评估器与优化目标配置 ---
@@ -129,8 +129,14 @@ evaluator_config:
         # 自由度 2: 纯 Y 轴移动 (无转动)
         - [0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
 
+#        # 自由度 3: 纯 X 轴转动 (无移动)
+#        - [1.0, 0.0, 0.0, null, null, null]
+#
+#        # 自由度 4: 纯 Y 轴转动 (无移动)
+#        - [0.0, 1.0, 0.0, null, null, null]
+
     check_global_consistency:
-      enable: true
+      enable: false
       weight: 1.0        # 在 Optimizer 中的权重，以及 Evaluator 评分的权重
       threshold: 0.05    # Evaluator 中的容忍阈值
 

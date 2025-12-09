@@ -5,13 +5,416 @@ from .utils import get_dh_matrix
 import networkx as nx
 
 
+def _build_extended_path(structure, raw_path):
+    """
+    构建扩展路径 (Padding)，用于处理任务约束的边界条件。
+    返回: [Ghost_Prev, Start_Node, ..., End_Node, Ghost_Next]
+    其中 Ghost 节点可能为 None。
+    """
+    if not raw_path:
+        return None
+
+    start_node = raw_path[0]
+    end_node = raw_path[-1]
+    path_set = set(raw_path)
+
+    # 1. 找起点的前驱 (最小非路径邻居)
+    # structure[u, :, 0] > 0.5 是邻居掩码
+    start_neighbors = torch.nonzero(structure[start_node, :, 0] > 0.5).view(-1).tolist()
+    valid_prev = [n for n in start_neighbors if n not in path_set]
+    ghost_prev = min(valid_prev) if valid_prev else None
+
+    # 2. 找终点的后继 (最大非路径邻居)
+    end_neighbors = torch.nonzero(structure[end_node, :, 0] > 0.5).view(-1).tolist()
+    valid_next = [n for n in end_neighbors if n not in path_set]
+    ghost_next = max(valid_next) if valid_next else None
+
+    # 3. 拼接
+    return [ghost_prev] + raw_path + [ghost_next]
+
+
+# ==============================================================================
+# 1. 基础运动学计算 (计算螺旋轴)
+# ==============================================================================
+
+def compute_all_joint_screws(structure, joint_angles, base_node=0):
+    """
+    计算所有关节的瞬时螺旋轴。
+
+    Args:
+        structure: (N, N, 5) 结构张量
+        joint_angles: (N, N) 关节锚点矩阵 (Anchor Angles)
+        base_node: 基座节点索引
+
+    Returns:
+        all_screws: (N, 6) 每个节点的单位螺旋轴
+    """
+    device = structure.device
+    N = structure.shape[0]
+    transforms_map = {}
+    screws_map = {}
+    visited = [False] * N
+
+    # 初始化基座
+    T_base = torch.eye(4, device=device)
+    transforms_map[base_node] = T_base
+    visited[base_node] = True
+
+    # BFS 队列: (current_node, off_in_u, q_in_u)
+    # q_in_u: 进入该节点时的相位锚点
+    queue = [(base_node, torch.tensor(0.0, device=device), torch.tensor(0.0, device=device))]
+
+    TWO_PI = 2 * math.pi
+
+    head = 0
+    while head < len(queue):
+        u, off_in_u, q_in_u = queue[head]
+        head += 1
+
+        T_global_u = transforms_map[u]
+
+        # --- 计算当前节点的螺旋 (Screw) ---
+        R_u = T_global_u[:3, :3]
+        p_u = T_global_u[:3, 3]
+        z_local = torch.tensor([0.0, 0.0, 1.0], device=device)
+        z_axis = R_u @ z_local
+
+        j_type_val = torch.max(structure[u, :, 1])
+        is_R = (j_type_val > 0.0).float()
+        is_P = 1.0 - is_R
+
+        w = is_R * z_axis
+        v_part = torch.linalg.cross(p_u, z_axis)
+        v = is_R * v_part + is_P * z_axis
+        screw_u = torch.cat([w, v], dim=0)
+        screws_map[u] = screw_u
+
+        # --- 传播到邻居 ---
+        neighbors = torch.nonzero(structure[u, :, 0] > 0.5).squeeze(1)
+        for v_idx in neighbors:
+            v = v_idx.item()
+            if not visited[v]:
+                params = structure[u, v]
+                a = torch.abs(params[2])
+                alpha = params[3] % TWO_PI
+
+                # 1. 几何参数差分
+                off_out = params[4]
+                delta_offset = off_out - off_in_u
+
+                # 2. 变量参数差分 (Anchor Difference)
+                # q_out - q_in
+                q_out = joint_angles[u, v]
+                delta_q = q_out - q_in_u
+
+                # 3. 分配 DH 参数
+                theta_val = is_R * delta_q + is_P * delta_offset
+                d_val = is_R * delta_offset + is_P * delta_q
+
+                T_step = get_dh_matrix(a, alpha, d_val, theta_val)
+                T_global_v = T_global_u @ T_step
+                transforms_map[v] = T_global_v
+                visited[v] = True
+
+                # 准备下一跳
+                off_in_v = structure[v, u, 4]
+                q_in_v = joint_angles[v, u]
+
+                queue.append((v, off_in_v, q_in_v))
+
+    # 组装结果
+    screw_list = []
+    zero_screw = torch.zeros(6, device=device)
+    for i in range(N):
+        if i in screws_map:
+            screw_list.append(screws_map[i])
+        else:
+            screw_list.append(zero_screw)
+
+    all_screws = torch.stack(screw_list)
+    return all_screws, None
+
+
+# ==============================================================================
+# 2. 锚点速度求解器 (Anchor Velocity Solver)
+# ==============================================================================
+
+def solve_anchor_system(structure, q_current, loops, extended_task_path=None, target_twist=None, target_mask=None,
+                        return_spectrum=False):
+    """
+    构建并求解锚点速度系统。
+
+    [修正] 统一变量名为 extended_task_path，解决 NameError。
+    """
+    device = structure.device
+    num_nodes = structure.shape[0]
+    num_vars_full = num_nodes * num_nodes
+
+    # --- 0. 动态确定基座 ---
+    active_nodes = set()
+    if loops:
+        for loop in loops: active_nodes.update(loop)
+
+    # [修正] 使用 extended_task_path 提取活跃节点 (排除 None)
+    if extended_task_path:
+        active_nodes.update([n for n in extended_task_path if n is not None])
+
+    base_node = min(active_nodes) if active_nodes else 0
+
+    # 1. 获取螺旋
+    all_screws, _ = compute_all_joint_screws(structure, q_current, base_node=base_node)
+
+    # 2. 构建全尺寸 K 矩阵和 b 向量
+    num_loops = len(loops)
+    # [修正] 检查 extended_task_path
+    has_task = (target_twist is not None and target_mask is not None and extended_task_path is not None)
+
+    if has_task and target_twist.dim() > 1:
+        raise ValueError("仅支持单任务")
+
+    total_rows = 6 * (num_loops + (1 if has_task else 0))
+    K_full = torch.zeros((total_rows, num_vars_full), device=device)
+    b = torch.zeros(total_rows, device=device)
+
+    current_row = 0
+
+    # --- A. 填充闭环约束 ---
+    for loop_nodes in loops:
+        L = len(loop_nodes)
+        for i in range(L):
+            curr = loop_nodes[i]
+            next_node = loop_nodes[(i + 1) % L]
+            prev_node = loop_nodes[(i - 1 + L) % L]
+
+            screw = all_screws[curr]
+            col_out = curr * num_nodes + next_node
+            col_in = curr * num_nodes + prev_node
+
+            K_full[current_row: current_row + 6, col_out] += screw
+            K_full[current_row: current_row + 6, col_in] -= screw
+        current_row += 6
+
+    # --- B. 填充任务约束 ---
+    if has_task:
+        K_path = torch.zeros((6, num_vars_full), device=device)
+
+        # [修正] 遍历 extended_task_path (含 Ghost 节点)
+        # 结构: [Ghost_Prev, Start, ..., End, Ghost_Next]
+        # 遍历中间的实体节点，索引从 1 到 len-2
+        for i in range(1, len(extended_task_path) - 1):
+            curr = extended_task_path[i]
+            prev_node = extended_task_path[i - 1]  # 可能为 None
+            next_node = extended_task_path[i + 1]  # 可能为 None
+
+            screw = all_screws[curr]
+
+            # 出边 (去往 Next)
+            if next_node is not None:
+                col_out = curr * num_nodes + next_node
+                K_path[:, col_out] += screw
+
+            # 入边 (来自 Prev)
+            if prev_node is not None:
+                col_in = curr * num_nodes + prev_node
+                K_path[:, col_in] -= screw
+
+        row_mask = (target_mask > 0.5).float().view(6, 1)
+        K_full[current_row: current_row + 6, :] = K_path * row_mask
+        b[current_row: current_row + 6] = target_twist * (target_mask > 0.5).float()
+
+    # =================================================================
+    # [核心] 矩阵瘦身 (Slimming Down)
+    # =================================================================
+
+    valid_mask = (structure[:, :, 0] > 0.5).view(-1)
+    if not valid_mask.any():
+        dummy_loss = torch.sum(1.0 - structure[:, :, 0]) * 100.0
+        return K_full, torch.zeros(num_vars_full, device=device), dummy_loss, None
+
+    K_reduced = K_full[:, valid_mask]
+    x_sol_full = torch.zeros(num_vars_full, device=device)
+    spectrum = None
+
+    # --- C. 统一求解 (SVD分解) ---
+    try:
+        if has_task:
+            # 增广矩阵法 [K_red | -b]
+            b_reduced = b.unsqueeze(1)
+            K_aug = torch.cat([K_reduced, -b_reduced], dim=1)
+
+            # SVD 分解
+            # 必须使用 full_matrices=True 以便在欠定系统(Rows < Cols)中获取完整的零空间基向量
+            U, S, Vh = torch.linalg.svd(K_aug, full_matrices=True)
+
+            # 提取解向量 (最小奇异值对应的右奇异向量 -> Vh 的最后一行)
+            v_min = Vh[-1, :]
+            x_reduced = v_min[:-1]
+            lambda_val = v_min[-1]
+
+            # 归一化 (强制 lambda=1)
+            if torch.abs(lambda_val) > 1e-6:
+                x_reduced = x_reduced / lambda_val
+            else:
+                x_reduced = x_reduced * 0.0
+
+            # 构造兼容的 Spectrum (升序特征值)
+            # 1. 平方 (Sigma^2 = Eigenvalue)
+            # 2. 翻转 (SVD是降序, EIGH是升序)
+            # 3. 补零 (如果 Rows < Cols，SVD 只返回 Rows 个值，剩下的都是 0)
+            num_vars_aug = K_aug.shape[1]
+            s_squared = (S ** 2)
+
+            # 补齐缺少的 0 特征值
+            padding_len = num_vars_aug - len(s_squared)
+            if padding_len > 0:
+                spectrum = torch.cat([torch.zeros(padding_len, device=device), s_squared.flip(0)])
+            else:
+                spectrum = s_squared.flip(0)
+
+            # 残差 = 最小奇异值的平方 (对应之前的 eigenvalue)
+            residual = spectrum[0]
+
+        else:
+            # 零空间求解 (K_reduced)
+            U, S, Vh = torch.linalg.svd(K_reduced, full_matrices=True)
+
+            # 最小奇异值向量
+            x_reduced = Vh[-1, :]
+
+            # 构造兼容 Spectrum
+            num_vars_red = K_reduced.shape[1]
+            s_squared = (S ** 2)
+
+            padding_len = num_vars_red - len(s_squared)
+            if padding_len > 0:
+                spectrum = torch.cat([torch.zeros(padding_len, device=device), s_squared.flip(0)])
+            else:
+                spectrum = s_squared.flip(0)
+
+            residual = spectrum[0]
+
+        # 映射回全尺寸
+        x_sol_full.masked_scatter_(valid_mask, x_reduced)
+
+    except Exception as e:
+        # 梯度保护
+        bad_gradient = torch.mean(torch.abs(K_full)) * 1000.0
+        return K_full, torch.zeros(num_vars_full, device=device), bad_gradient, None
+
+    # =================================================================
+    # [核心] 消除节点级规范自由度
+    # =================================================================
+    x_matrix = x_sol_full.view(num_nodes, num_nodes)
+    valid_mask_matrix = (structure[:, :, 0] > 0.5).float()
+
+    row_sums = torch.sum(x_matrix * valid_mask_matrix, dim=1, keepdim=True)
+    row_counts = torch.sum(valid_mask_matrix, dim=1, keepdim=True)
+    row_means = row_sums / (row_counts + 1e-8)
+
+    x_centered = x_matrix - row_means
+    x_matrix_clean = x_centered * valid_mask_matrix
+    x_sol_final = x_matrix_clean.view(-1)
+
+    return K_full, x_sol_final, residual, spectrum
+
+
+# ==============================================================================
+# 3. 核心 Loss 计算 (基于锚点速度的一致性)
+# ==============================================================================
+
+def compute_motion_consistency_loss(structure, q_current, loops, path_to_ee,
+                                    target_twists=None, target_masks=None, dt=1e-3):
+    """
+    基于 Anchor Velocity 的二阶全周一致性 Loss。
+
+    逻辑:
+    1. 针对每个任务模式，求解 T=0 时刻的一阶锚点速度 x0。
+    2. 更新锚点位置 Q_new = Q + x0 * dt。
+    3. 构建 T=dt 时刻的矩阵 K1。
+    4. 计算漂移 Drift = (K1 * x0 - K0 * x0) / dt。
+    5. 求解二阶加速度 x_ddot，并计算其与 x0 的法向偏差。
+    """
+    device = structure.device
+    num_nodes = structure.shape[0]
+    total_loss = torch.tensor(0.0, device=device)
+
+    # 预构建扩展路径 (避免在循环中重复构建)
+    extended_path = _build_extended_path(structure, path_to_ee)
+
+    has_tasks = (target_twists is not None and target_masks is not None and len(target_twists) > 0)
+    num_modes = target_twists.shape[0] if has_tasks else 1
+
+    for k in range(num_modes):
+        tgt_twist = target_twists[k] if has_tasks else None
+        tgt_mask = target_masks[k] if has_tasks else None
+
+        # 1. 求解 T=0 时刻的一阶锚点速度 x0
+        # 返回: K, x, residual, spectrum
+        K0, x0, residual0, _ = solve_anchor_system(
+            structure, q_current, loops, extended_path, tgt_twist, tgt_mask
+        )
+
+        # 归一化 x0 (防止数值过大导致微分失效，或数值过小导致精度丢失)
+        x_norm = torch.norm(x0)
+
+        # 如果速度极小(死锁) 或者 任务残差过大(不可达)，直接惩罚并跳过二阶计算
+        if x_norm < 1e-6 or (has_tasks and residual0 > 0.1):
+            total_loss += 1.0
+            continue
+
+        x0 = x0 / x_norm
+
+        # 2. 更新状态 (Q矩阵更新)
+        # Anchor Velocity 是锚点位置的时间导数，直接叠加
+        q_next = q_current + x0.view(num_nodes, num_nodes) * dt
+
+        # 3. 构建 T=dt 时刻的矩阵 K1
+        # 我们只需要 K1，不需要求解
+        K1, _, _, _ = solve_anchor_system(
+            structure, q_next, loops, extended_path, tgt_twist, tgt_mask
+        )
+
+        # 4. 计算漂移 (Drift)
+        # Drift = d(Kx)/dt = (K_new * x - K_old * x) / dt
+        # 对于有任务的情况 (Kx=b)，d(Kx-b)/dt = K_dot*x = 0，所以 drift 依然是衡量 K 变化的指标
+        term1 = K1 @ x0
+        term2 = K0 @ x0
+        drift = (term1 - term2) / dt
+
+        # 5. 求解二阶锚点加速度 x_ddot
+        # 方程: K0 * x_ddot = -drift
+        # 使用阻尼最小二乘求解线性方程组
+        H = K0.T @ K0
+        damping = 1e-4 * torch.eye(num_nodes * num_nodes, device=device)
+        rhs = K0.T @ (-drift)
+
+        try:
+            x_ddot = torch.linalg.solve(H + damping, rhs)
+        except:
+            x_ddot = torch.zeros_like(x0)
+
+        # 6. 一致性判据 (Consistency Metric)
+        # 投影: 计算 x_ddot 在 x0 方向上的垂直分量
+        proj = torch.dot(x_ddot, x0) * x0
+        x_perp = x_ddot - proj
+
+        # Loss: 漂移分量的模长
+        mode_loss = torch.norm(x_perp)
+        total_loss += mode_loss
+
+    if has_tasks:
+        return total_loss / num_modes
+    else:
+        return total_loss
+
+
+# ==============================================================================
+# 4. 其他 Loss 函数 (保持逻辑，适配接口)
+# ==============================================================================
+
 def compute_loop_errors(structure, joint_angles, loops):
     """
-    计算闭环误差 (纯 PyTorch 实现，支持自动微分)
-    [修改说明]
-    1. 使用 abs/mod 保证物理参数合法。
-    2. [修改] 使用相对误差：位置误差除以 (最大杆长)^2。
-       这比除以总杆长更严格，能避免误差被长周长稀释。
+    [修改版] 支持 q_opt 为 (N, N) 矩阵。
     """
     device = structure.device
     total_error = torch.tensor(0.0, device=device)
@@ -20,8 +423,6 @@ def compute_loop_errors(structure, joint_angles, loops):
     for path in loops:
         T_cum = torch.eye(4, device=device)
         L = len(path)
-
-        # [新增] 追踪环路中的最大杆长
         max_link_length = torch.tensor(0.0, device=device)
 
         for i in range(L):
@@ -29,51 +430,40 @@ def compute_loop_errors(structure, joint_angles, loops):
             v = path[(i + 1) % L]
             prev = path[(i - 1 + L) % L]
 
-            # 1. 提取参数
+            # 1. 提取结构参数
             params = structure[u, v]
             j_type = params[1]
-
-            # 物理约束处理
             a = torch.abs(params[2])
             alpha = params[3] % TWO_PI
-
-            # [核心修改] 更新最大杆长
-            # 使用 torch.max 保持梯度流 (Subgradient)
             max_link_length = torch.max(max_link_length, a)
 
             # 2. Offset 差分
             off_out = structure[u, v, 4]
             off_in = structure[u, prev, 4]
-            delta = off_out - off_in
+            delta_offset = off_out - off_in
 
-            # 3. 提取变量
-            q = joint_angles[u]
+            # 3. Anchor Difference
+            q_out = joint_angles[u, v]
+            q_in = joint_angles[u, prev]
+            delta_q = q_out - q_in
 
             # 4. 分配变量
             is_R = (j_type > 0).float()
             is_P = 1.0 - is_R
 
-            theta = is_R * q + is_P * delta
-            d = is_R * delta + is_P * q
+            theta = is_R * delta_q + is_P * delta_offset
+            d = is_R * delta_offset + is_P * delta_q
 
             # 5. 计算矩阵
             T_step = get_dh_matrix(a, alpha, d, theta)
             T_cum = T_cum @ T_step
 
         # 6. 计算误差
-        # 位置误差 (绝对值平方)
         pos_err_abs = torch.sum(T_cum[:3, 3] ** 2)
-
-        # [核心修改] 转换为相对位置误差
-        # 除以 (最大杆长)^2
-        # 如果最大杆长接近0 (虽然我们有约束防止它发生)，加 epsilon 防止除以0
         scale_factor = max_link_length ** 2 + 1e-6
         pos_err_rel = pos_err_abs / scale_factor
-
-        # 姿态误差 (旋转矩阵本身就是归一化的)
         rot_err = torch.sum((T_cum[:3, :3] - torch.eye(3, device=device)) ** 2)
 
-        # 总误差
         total_error = total_error + pos_err_rel + rot_err
 
     return total_error
@@ -189,403 +579,116 @@ def compute_bennett_geometry_error(structure, loops):
     return total_error
 
 
-def compute_all_joint_screws(structure, joint_angles, base_node=0):
+def compute_mobility_loss_eigen(structure, q, loops, num_dof=1, gap_threshold=0.01, require_exact_dof=False):
     """
-    [修正版] 避免 In-place 操作，修复 RuntimeError。
-    使用字典存储中间变换矩阵，最后再 stack 成张量。
-    """
-    device = structure.device
-    N = structure.shape[0]
-
-    # 1. 初始化容器 (使用字典代替 Tensor 以避免 In-place 修改)
-    # transforms_map: {node_index: T_global_tensor}
-    transforms_map = {}
-
-    # 存储结果螺旋的字典
-    screws_map = {}
-
-    # 标记是否已计算
-    visited = [False] * N
-
-    # 2. 设置基座 (Base)
-    T_base = torch.eye(4, device=device)
-    transforms_map[base_node] = T_base
-    visited[base_node] = True
-
-    # 3. BFS 队列
-    queue = [(base_node, torch.tensor(0.0, device=device))]
-    TWO_PI = 2 * math.pi
-
-    head = 0
-    while head < len(queue):
-        u, off_in_u = queue[head]
-        head += 1
-
-        # 从字典中获取 u 的全局位姿 (这是独立的 tensor，不是 slice)
-        T_global_u = transforms_map[u]
-
-        # --- A. 计算当前节点 u 的螺旋 ---
-        R_u = T_global_u[:3, :3]
-        p_u = T_global_u[:3, 3]
-
-        z_local = torch.tensor([0.0, 0.0, 1.0], device=device)
-        z_axis = R_u @ z_local
-
-        # 获取关节类型 (取行最大值作为标识)
-        j_type_val = torch.max(structure[u, :, 1])
-        is_R = (j_type_val > 0.0).float()
-        is_P = 1.0 - is_R
-
-        # 构造螺旋
-        w = is_R * z_axis
-        v_part = torch.linalg.cross(p_u, z_axis)
-        v = is_R * v_part + is_P * z_axis
-
-        screw_u = torch.cat([w, v], dim=0)
-        screws_map[u] = screw_u
-
-        # --- B. 传播到邻居 ---
-        neighbors = torch.nonzero(structure[u, :, 0] > 0.5).squeeze(1)
-
-        for v_idx in neighbors:
-            v = v_idx.item()
-            if not visited[v]:
-                # 计算 T_{u->v}
-                params = structure[u, v]
-                a = torch.abs(params[2])
-                alpha = params[3] % TWO_PI
-
-                off_out = params[4]
-                d = off_out - off_in_u
-
-                q = joint_angles[u]
-                theta_val = is_R * q
-                d_val = d + is_P * q
-
-                T_step = get_dh_matrix(a, alpha, d_val, theta_val)
-
-                # 计算 v 的全局位姿 (创建新 Tensor)
-                T_global_v = T_global_u @ T_step
-
-                # 存入字典 (安全操作)
-                transforms_map[v] = T_global_v
-                visited[v] = True
-
-                off_in_v = structure[v, u, 4]
-                queue.append((v, off_in_v))
-
-    # --- C. 重组为张量 ---
-    # 将字典转回 (N, 6) 的张量
-    screw_list = []
-    # 也可以顺便返回 transforms 张量用于 debug，这里只需 screws
-
-    zero_screw = torch.zeros(6, device=device)
-
-    for i in range(N):
-        if i in screws_map:
-            screw_list.append(screws_map[i])
-        else:
-            # 对于未连接的节点，填充 0
-            screw_list.append(zero_screw)
-
-    # 使用 stack 保持梯度流
-    all_screws = torch.stack(screw_list)
-
-    # global_transforms 如果不需要可以返回 None，或者同样用 stack 组装
-    return all_screws, None
-
-
-def compute_mobility_loss_eigen(structure, q, loops, num_dof=1, gap_threshold=0.005):
-    """
-    计算全局可动性 Loss。
-    Args:
-        gap_threshold: 谱间隙阈值。第 K+1 个特征值必须大于此值。
+    [修改版] 复用 solve_anchor_system 的计算结果。
     """
     device = structure.device
-
-    # ... (1. 动态确定基座 ... 2. 构建雅可比 ... 3. 特征值分解 保持不变) ...
-
-    # 1. 动态确定基座
-    active_nodes = set()
-    for loop in loops:
-        active_nodes.update(loop)
-    if not active_nodes: return torch.tensor(0.0, device=device)
-    base_node = min(active_nodes)
-
-    all_screws, _ = compute_all_joint_screws(structure, q, base_node=base_node)
-
-    constraint_rows = []
     num_nodes = structure.shape[0]
-    for loop_nodes in loops:
-        J_loop = torch.zeros((6, num_nodes), device=device)
-        for node_idx in loop_nodes:
-            J_loop[:, node_idx] = all_screws[node_idx]
-        constraint_rows.append(J_loop)
-    J_global = torch.cat(constraint_rows, dim=0)
 
-    G_mat = J_global.T @ J_global
-    eigenvalues = torch.linalg.eigvalsh(G_mat)  # 升序
+    # 1. 调用求解器，获取特征值谱 (Spectrum)
+    # 注意：这里我们不需要任务 (target_twist=None)，只关心机构本身的拓扑属性
+    _, _, _, spectrum = solve_anchor_system(
+        structure, q, loops,
+        extended_task_path=None, target_twist=None, target_mask=None,
+        return_spectrum=True
+    )
 
-    # 4. 计算 Loss
+    # 如果求解失败返回 None
+    if spectrum is None:
+        return torch.tensor(100.0, device=device)
 
-    # A. 必须为 0 的部分 (Target DOFs)
-    target_zero_eigs = eigenvalues[:num_dof]
-    loss_zeros = torch.sum(torch.abs(target_zero_eigs))
+    # 2. 这里的 spectrum 已经是 K_reduced^T @ K_reduced 的特征值了
+    # 直接使用即可
+    eigenvalues = spectrum
 
-    # B. 必须不为 0 的部分 (Spectral Gap)
+    # 3. 定义目标零空间维度
+    # Total Nullity = N (Gauge) + F (Physical)
+    target_zero_count = num_nodes + num_dof
+
+    if len(eigenvalues) <= target_zero_count:
+        return torch.tensor(10.0, device=device)
+
+    # --- A. 零空间 Loss ---
+    target_zeros = eigenvalues[:target_zero_count]
+    loss_zeros = torch.sum(torch.abs(target_zeros))
+
+    # --- B. Gap Loss ---
     loss_gap = torch.tensor(0.0, device=device)
-    if len(eigenvalues) > num_dof:
-        next_eig = eigenvalues[num_dof]
-
-        # [修改] 使用传入的 gap_threshold
-        # 我们希望 next_eig >= gap_threshold
+    if require_exact_dof:
+        next_eig = eigenvalues[target_zero_count]
         loss_gap = torch.relu(gap_threshold - next_eig)
 
-    # 5. 总 Loss
     total_loss = loss_zeros * 100.0 + loss_gap * 10.0
-
     return total_loss
 
 
 def compute_task_loss_eigen(structure, q, loops, G_graph, config_ee_node, target_twists, target_masks):
     """
-    [增强版 v2.0] 计算任务 Loss (全系统增广矩阵法)。
-    同时考虑闭环约束和任务目标，确保满足任务的关节速度同时也满足闭环条件。
+    [修改版] 任务残差 Loss。
 
-    构建矩阵:
-    [ J_loops       |  0   ]
-    [ J_path_masked | Target ]
+    修正逻辑：
+    1. 不再使用 solve_anchor_system 返回的 residual (spectrum[0])，因为它被规范自由度占据永远为0。
+    2. 而是提取 spectrum，剔除前 N 个规范自由度。
+    3. 最小化 spectrum[num_nodes] (即第 N+1 个特征值)。
     """
     device = structure.device
+    num_nodes = structure.shape[0]
     loss_total = torch.tensor(0.0, device=device)
 
-    # 1. 动态确定基座和末端
+    # 1. 确定路径
     graph_nodes = list(G_graph.nodes())
     if not graph_nodes: return loss_total
 
     base_node = min(graph_nodes)
-    if config_ee_node in graph_nodes:
-        final_ee_node = config_ee_node
-    else:
-        final_ee_node = max(graph_nodes)
+    ee_node = config_ee_node if config_ee_node in graph_nodes else max(graph_nodes)
 
-    # 2. 计算全局螺旋
-    all_screws, _ = compute_all_joint_screws(structure, q, base_node=base_node)
-
-    # 3. 构建闭环雅可比 J_loops (6L, N)
-    # 这是为了保证求出的速度解满足机构的物理约束
-    num_nodes = structure.shape[0]
-    constraint_rows = []
-    for loop_nodes in loops:
-        J_loop = torch.zeros((6, num_nodes), device=device)
-        for node_idx in loop_nodes:
-            J_loop[:, node_idx] = all_screws[node_idx]
-        constraint_rows.append(J_loop)
-
-    if constraint_rows:
-        J_loops = torch.cat(constraint_rows, dim=0)
-    else:
-        # 如果没有环(虽然会被过滤)，给一个空矩阵
-        J_loops = torch.zeros((0, num_nodes), device=device)
-
-    # 4. 构建路径雅可比 J_path (6, N)
     try:
-        path_to_ee = nx.shortest_path(G_graph, source=base_node, target=final_ee_node)
-    except (nx.NetworkXNoPath, nx.NodeNotFound):
-        return loss_total
+        raw_path = nx.shortest_path(G_graph, source=base_node, target=ee_node)
+    except:
+        return torch.tensor(100.0, device=device)
 
-    path_screws = [all_screws[u] for u in path_to_ee]
-    J_path = torch.stack(path_screws, dim=1)  # (6, M)
+    # 2. 构建扩展路径
+    extended_path = _build_extended_path(structure, raw_path)
 
-    # 需要将 J_path 映射回 (6, N) 的全尺寸矩阵，以便与 J_loops 对齐
-    J_path_full = torch.zeros((6, num_nodes), device=device)
-    for i, u in enumerate(path_to_ee):
-        J_path_full[:, u] = J_path[:, i]
-
-    # 5. 遍历目标模式，构建增广矩阵并计算特征值
     num_patterns = target_twists.shape[0]
 
+    # 3. 遍历每个任务模式
     for k in range(num_patterns):
-        target_val = target_twists[k]
+        tgt = target_twists[k]
         mask = target_masks[k]
-        mask_bool = mask.bool()
 
-        if mask_bool.any():
-            # --- A. 准备子矩阵 ---
-            # 任务部分: 只取 Mask 选中的行
-            J_path_masked = J_path_full[mask_bool, :]  # (D, N)
-            target_masked = target_val[mask_bool].unsqueeze(1)  # (D, 1)
+        if mask.bool().any():
+            # 调用求解器，请求返回谱 (Spectrum)
+            _, _, _, spectrum = solve_anchor_system(
+                structure, q, loops,
+                extended_task_path=extended_path,
+                target_twist=tgt,
+                target_mask=mask,
+                return_spectrum=True
+            )
 
-            # --- B. 构建全系统矩阵 ---
-            # 我们要构建:
-            # [ J_loops | 0 ]  <-- 闭环约束 (必须满足)
-            # [ J_path  | t ]  <-- 任务约束
-
-            # 上半部分: [J_loops, 0]
-            if J_loops.size(0) > 0:
-                zeros_col = torch.zeros((J_loops.size(0), 1), device=device)
-                top_block = torch.cat([J_loops, zeros_col], dim=1)  # (6L, N+1)
-            else:
-                top_block = torch.empty((0, num_nodes + 1), device=device)
-
-            # 下半部分: [J_path_masked, target_masked]
-            bottom_block = torch.cat([J_path_masked, target_masked], dim=1)  # (D, N+1)
-
-            # 拼接
-            M_total = torch.cat([top_block, bottom_block], dim=0)
-
-            # --- C. 计算特征值 ---
-            G_aug = M_total.T @ M_total
-            evals_aug = torch.linalg.eigvalsh(G_aug)
-
-            # 最小特征值应为 0
-            # 这意味着存在一组 (q_dot, c) 同时满足闭环和任务
-            loss_total += torch.abs(evals_aug[0])
-
-    return loss_total * 50.0  # 权重
-
-
-def _get_jacobians_and_screws(structure, q, loops, path_to_ee, base_node=0):
-    """
-    辅助函数：计算闭环雅可比 J_loop、完整路径雅可比 J_path_full 以及所有螺旋。
-    """
-    device = structure.device
-    num_nodes = structure.shape[0]
-
-    # 1. 计算所有关节的瞬时螺旋
-    all_screws, _ = compute_all_joint_screws(structure, q, base_node=base_node)
-
-    # 2. 构建闭环约束雅可比 J_loop (6L x N)
-    loop_rows = []
-    if loops:
-        for loop_nodes in loops:
-            J_sub = torch.zeros((6, num_nodes), device=device)
-            for node_idx in loop_nodes:
-                J_sub[:, node_idx] = all_screws[node_idx]
-            loop_rows.append(J_sub)
-        J_loop = torch.cat(loop_rows, dim=0)
-    else:
-        J_loop = torch.zeros((0, num_nodes), device=device)
-
-    # 3. 构建路径雅可比 J_path_full (6 x N)
-    # 每一列对应路径上该节点的螺旋，不在路径上的为0
-    J_path_full = torch.zeros((6, num_nodes), device=device)
-    if path_to_ee:
-        for i, node_idx in enumerate(path_to_ee):
-            # 注意：all_screws[node_idx] 是 (6,)
-            J_path_full[:, node_idx] = all_screws[node_idx]
-
-    return J_loop, J_path_full, all_screws
-
-
-def compute_motion_consistency_loss(structure, q_current, loops, path_to_ee,
-                                    target_twists=None, target_masks=None, dt=1e-3):
-    """
-    计算二阶全周运动一致性 Loss (修复版)。
-
-    [修复] 将 torch.linalg.eigvalsh 改为 torch.linalg.eigh 以正确获取特征向量。
-    """
-    device = structure.device
-    base_node = min(path_to_ee) if path_to_ee else 0
-    num_nodes = structure.shape[0]
-
-    # --- 1. 准备 T=0 时刻的雅可比 ---
-    J_loop_0, J_path_0, _ = _get_jacobians_and_screws(structure, q_current, loops, path_to_ee, base_node)
-
-    total_loss = torch.tensor(0.0, device=device)
-
-    has_tasks = (target_twists is not None and target_masks is not None and len(target_twists) > 0)
-    num_modes = target_twists.shape[0] if has_tasks else 1
-
-    for k in range(num_modes):
-        # === 2. 求解一阶速度 q_dot (使用特征值分解) ===
-        if has_tasks:
-            # 构建增广矩阵 [J_loop; J_task]
-            tgt_twist = target_twists[k]
-            tgt_mask = target_masks[k].bool()
-
-            if not tgt_mask.any():
+            # 异常保护
+            if spectrum is None:
+                loss_total += 10.0
                 continue
 
-            J_task_masked = J_path_0[tgt_mask, :]  # (D, N)
-            target_masked = tgt_twist[tgt_mask].view(-1, 1)  # (D, 1)
+            # [核心修正]
+            # 锚点系统必然存在 N 个规范自由度 (特征值为0)
+            # 我们要检查的是：是否存在第 N+1 个零空间向量 (代表任务解)
+            # 所以我们要优化的是 spectrum[num_nodes]
 
-            # [J_loop, 0]
-            if J_loop_0.size(0) > 0:
-                zeros_col = torch.zeros((J_loop_0.size(0), 1), device=device)
-                top_block = torch.cat([J_loop_0, zeros_col], dim=1)
+            # 检查谱的长度是否足够
+            target_idx = num_nodes
+            if len(spectrum) > target_idx:
+                # 取第 N+1 个特征值 (注意 spectrum 是升序排列的)
+                # 这个值越小，说明 [K|-b] 越接近存在一个非平凡的零空间解
+                val = spectrum[target_idx]
+
+                # 加上绝对值防止极微小的负数噪声
+                loss_total += torch.abs(val)
             else:
-                top_block = torch.empty((0, num_nodes + 1), device=device)
+                # 这种情况极少发生 (除非有效边数极少)，给一个惩罚
+                loss_total += 1.0
 
-            # [J_task, -target]
-            bottom_block = torch.cat([J_task_masked, -target_masked], dim=1)
-            M_aug = torch.cat([top_block, bottom_block], dim=0)
-
-            # G = M^T * M
-            G_aug = M_aug.T @ M_aug
-
-            # [修复点 1] 使用 eigh 获取特征值和特征向量
-            evals, evecs = torch.linalg.eigh(G_aug)
-
-            # 取最小特征值对应的特征向量
-            v_sol = evecs[:, 0]
-            q_dot = v_sol[:num_nodes]
-
-            # [梯度保护]
-            q_norm = torch.norm(q_dot)
-            q_dot = q_dot / (q_norm + 1e-8)
-
-        else:
-            # 无任务：仅解闭环零空间
-            if J_loop_0.size(0) > 0:
-                G_loop = J_loop_0.T @ J_loop_0
-                # [修复点 2] 使用 eigh 获取特征值和特征向量
-                evals, evecs = torch.linalg.eigh(G_loop)
-                q_dot = evecs[:, 0]  # 最小特征值对应方向
-            else:
-                q_dot = torch.ones(num_nodes, device=device)
-                q_dot = q_dot / torch.norm(q_dot)
-
-        # 验证速度有效性
-        v_ee_0 = J_path_0 @ q_dot
-        v_norm_sq = torch.sum(v_ee_0 ** 2)
-
-        # === 3. 计算二阶漂移 (Finite Difference) ===
-        q_next = q_current + q_dot * dt
-        J_loop_1, J_path_1, _ = _get_jacobians_and_screws(structure, q_next, loops, path_to_ee, base_node)
-
-        # Drift = \dot{J} * \dot{q}
-        drift_loop = (J_loop_1 @ q_dot - J_loop_0 @ q_dot) / dt
-
-        # === 4. 求解二阶被动加速度 q_ddot (使用阻尼最小二乘法) ===
-        if J_loop_0.size(0) > 0:
-            damping = 1e-4
-            JTJ = J_loop_0.T @ J_loop_0
-            I = torch.eye(num_nodes, device=device)
-
-            A_damped = JTJ + damping * I
-            b_damped = J_loop_0.T @ (-drift_loop)
-
-            try:
-                q_ddot = torch.linalg.solve(A_damped, b_damped)
-            except:
-                q_ddot = torch.zeros_like(q_dot)
-        else:
-            q_ddot = torch.zeros_like(q_dot)
-
-        # === 5. 计算末端全加速度 ===
-        drift_ee = (J_path_1 @ q_dot - J_path_0 @ q_dot) / dt
-        acc_ee = J_path_0 @ q_ddot + drift_ee
-
-        # === 6. 正交投影判据 ===
-        proj_scalar = torch.dot(acc_ee, v_ee_0) / (v_norm_sq + 1e-6)
-        acc_parallel = proj_scalar * v_ee_0
-        acc_perp = acc_ee - acc_parallel
-
-        mode_loss = torch.norm(acc_perp) / (torch.norm(acc_ee) + 1e-6)
-        total_loss += mode_loss
-
-    if has_tasks:
-        return total_loss / num_modes
-    else:
-        return total_loss
+    return loss_total * 50.0  # 权重系数

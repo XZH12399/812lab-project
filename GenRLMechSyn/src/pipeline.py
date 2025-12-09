@@ -442,21 +442,38 @@ class TrainingPipeline:
                     total_cycles=total_cycles, optimized_joint_angles=best_q, known_loops=loops
                 )
 
-                # 打印详细报告 (这里可以保持原样，或进一步封装成 helper)
+                # 打印详细报告
                 print(f"\n  >>> [详细参数报告] Mech {i + 1:02d} (Score: {score:.4f}) <<<")
+
+                # best_q 现在是 (N, N) 矩阵
                 q_vals = best_q.detach().cpu().numpy()
+
                 if loops:
                     for loop_idx, path in enumerate(loops):
                         l_type = "Rigid" if len(path) < 4 else "Kinematic"
                         print(f"  --- Loop {loop_idx + 1}: {path} ({l_type}) ---")
                         L = len(path)
                         for idx, u in enumerate(path):
-                            v = path[(idx + 1) % L];
+                            v = path[(idx + 1) % L]
                             prev = path[(idx - 1 + L) % L]
+
                             p = final_np[u, v]
                             t_str = "R" if p[1] > 0 else "P"
+
+                            # [修正] 针对 (N, N) 矩阵的取值逻辑
+                            # 关节变量 = 出边锚点(u->v) - 入边锚点(u->prev)
+                            q_out = q_vals[u, v]
+                            q_in = q_vals[u, prev]
+                            diff_q = q_out - q_in
+
+                            # (可选) 归一化显示到 [-pi, pi]
+                            import numpy as np
+                            diff_q = np.arctan2(np.sin(diff_q), np.cos(diff_q))
+
+                            # Offset 差值
                             d_val = p[4] - final_np[u, prev, 4]
-                            print(f"    [{u}|{t_str}] q={q_vals[u]:.4f} --> a={p[2]:.4f}, al={p[3]:.4f}, d={d_val:.4f}")
+
+                            print(f"    [{u}|{t_str}] q={diff_q:.4f} --> a={p[2]:.4f}, al={p[3]:.4f}, d={d_val:.4f}")
                 print("-" * 60 + "\n")
 
             # E. 收集结果
@@ -551,8 +568,10 @@ class TrainingPipeline:
             # --- 2.1 初始化变量 ---
             # x_opt: 从 DiT 初值克隆 (保证起点一致)
             x_opt = x_init_raw.clone().requires_grad_(True)
-            # q_opt: 全局均匀随机 [-pi, pi]
-            q_opt = torch.empty(max_nodes, device=self.device).uniform_(-math.pi, math.pi).requires_grad_(True)
+            # [核心修改] q_opt 改为 (N, N) 矩阵，与 offset 维度一致
+            # q_opt[u, v] 表示连杆 (u, v) 在节点 u 处的相位/位移锚点
+            q_opt = torch.empty((max_nodes, max_nodes), device=self.device).uniform_(-math.pi, math.pi).requires_grad_(
+                True)
 
             # 强制初始化合法 (防退化)
             with torch.no_grad():
@@ -600,7 +619,8 @@ class TrainingPipeline:
                 if enable_mobility:
                     loss_m = compute_mobility_loss_eigen(
                         structure, q_opt, loops, num_dof=target_data['num_dof'],
-                        gap_threshold=opt_config['gap_threshold']
+                        gap_threshold=opt_config['gap_threshold'],
+                        require_exact_dof=enable_task,
                     )
                     loss += weights['mobility'] * loss_m
                     current_metric += loss_m.item()
@@ -661,7 +681,8 @@ class TrainingPipeline:
                 with torch.no_grad():
                     x_opt.data.clamp_(-1.0, 1.0)
                     x_opt.data[:, 2, :, :].clamp_(min=-0.95)
-                    q_opt.data.clamp_(-math.pi, math.pi)
+                    # q_opt.data.clamp_(-math.pi, math.pi)
+                    q_opt.data.clamp_(-1000.0, 1000.0)
 
                 # (g) 调试打印 (仅打印第一个样本的第一次尝试)
                 if mech_idx == 0 and attempt == 0 and (step == 0 or (step + 1) % 20 == 0):
