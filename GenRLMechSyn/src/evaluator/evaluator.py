@@ -21,7 +21,7 @@ from ..solver.simple_kinematics import (
     compute_mobility_loss_eigen,
     compute_task_loss_eigen,
     _build_extended_path,
-    compute_motion_consistency_loss
+    compute_instantaneous_check_loss
 )
 
 
@@ -332,7 +332,7 @@ class MechanismEvaluator:
 
         try:
             # 2. 调用求解器获取完整谱 (包含 N 个规范自由度)
-            _, _, _, spectrum = solve_anchor_system(
+            _, _, _, _, spectrum = solve_anchor_system(
                 structure, optimized_joint_angles, loops,
                 extended_task_path=None, target_twist=None, target_mask=None,
                 return_spectrum=True
@@ -430,7 +430,7 @@ class MechanismEvaluator:
             try:
                 # B. 调用求解器
                 # 注意：min_eig 是 spectrum[0]，对应规范自由度，这里不使用它
-                _, _, _, spectrum = solve_anchor_system(
+                _, _, _, _, spectrum = solve_anchor_system(
                     structure, optimized_joint_angles, loops,
                     extended_task_path=extended_path,
                     target_twist=target_twist,
@@ -540,7 +540,7 @@ class MechanismEvaluator:
 
             # 5. 调用二阶求解器计算 Loss
             # 注意：如果 target_twists 为 None，函数内部会自动退化为无任务的一致性检查
-            loss_tensor = compute_motion_consistency_loss(
+            loss_tensor = compute_instantaneous_check_loss(
                 structure, optimized_joint_angles, loops, path_to_ee,
                 target_twists=target_twists, target_masks=target_masks
             )

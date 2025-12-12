@@ -24,7 +24,7 @@ from .solver.simple_kinematics import (
     # compute_all_joint_screws, # 这个如果pipeline里不直接用可以去掉
     compute_mobility_loss_eigen,
     compute_task_loss_eigen,
-    compute_motion_consistency_loss
+    compute_instantaneous_check_loss
 )
 
 
@@ -648,7 +648,7 @@ class TrainingPipeline:
                         tgt_twists = target_data['twists']  # (K, 6)
                         tgt_masks = target_data['masks']  # (K, 6)
 
-                    loss_cons = compute_motion_consistency_loss(
+                    loss_cons = compute_instantaneous_check_loss(
                         structure, q_opt, loops, path_to_ee,
                         target_twists=tgt_twists, target_masks=tgt_masks  # <--- 传入完整列表
                     )

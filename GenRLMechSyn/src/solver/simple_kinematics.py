@@ -139,206 +139,161 @@ def compute_all_joint_screws(structure, joint_angles, base_node=0):
 # 2. 锚点速度求解器 (Anchor Velocity Solver)
 # ==============================================================================
 
-def solve_anchor_system(structure, q_current, loops, extended_task_path=None, target_twist=None, target_mask=None,
-                        return_spectrum=False):
+def solve_anchor_system(structure, q_current, loops, extended_task_path=None, target_twist=None,
+                        target_mask=None, return_spectrum=False):
     """
     构建并求解锚点速度系统。
-
-    [修正] 统一变量名为 extended_task_path，解决 NameError。
+    返回:
+        edge_to_col: 字典 {(u,v): col_idx, ...}
+        K_compact:   紧凑 Jacobian
+        x_compact:   紧凑解向量 (None if SVD fails)
+        residual:    任务残差
+        spectrum:    奇异值谱
     """
     device = structure.device
-    num_nodes = structure.shape[0]
-    num_vars_full = num_nodes * num_nodes
 
-    # --- 0. 动态确定基座 ---
+    # 1. 确定计算所需的节点和 Screw
     active_nodes = set()
-    if loops:
-        for loop in loops: active_nodes.update(loop)
-
-    # [修正] 使用 extended_task_path 提取活跃节点 (排除 None)
+    for loop in loops: active_nodes.update(loop)
     if extended_task_path:
-        active_nodes.update([n for n in extended_task_path if n is not None])
+        active_nodes.update([n for n in extended_task_path if n is not None and n >= 0])
 
-    base_node = min(active_nodes) if active_nodes else 0
+    if not active_nodes:
+        return None, None, None, None, None
 
-    # 1. 获取螺旋
-    all_screws, _ = compute_all_joint_screws(structure, q_current, base_node=base_node)
+    # 确定基座
+    if extended_task_path and len(extended_task_path) > 1 and extended_task_path[1] is not None:
+        base_node = extended_task_path[1]
+    else:
+        base_node = min(active_nodes)
 
-    # 2. 构建全尺寸 K 矩阵和 b 向量
+    all_screws, _ = compute_all_joint_screws(structure, q_current, base_node)
+
+    # 2. 建立变量映射 (Edge to Column)
+    involved_edges_set = set()
+    # A. Loops
+    for loop in loops:
+        L = len(loop)
+        for i in range(L):
+            u, v = loop[i], loop[(i + 1) % L]
+            involved_edges_set.add(tuple(sorted((u, v))))
+    # B. Task Path
+    if extended_task_path:
+        for i in range(len(extended_task_path) - 1):
+            u, v = extended_task_path[i], extended_task_path[i + 1]
+            if u is not None and v is not None and u >= 0 and v >= 0:
+                involved_edges_set.add(tuple(sorted((u, v))))
+
+    # C. 构建映射
+    edge_to_col = {}
+    current_col = 0
+    for u, v in sorted(list(involved_edges_set)):
+        edge_to_col[(u, v)] = current_col;
+        current_col += 1
+        edge_to_col[(v, u)] = current_col;
+        current_col += 1
+
+    num_vars_reduced = current_col
+    if num_vars_reduced == 0:
+        return None, None, None, None, None
+
+    # 3. 构建 Jacobian
     num_loops = len(loops)
-    # [修正] 检查 extended_task_path
-    has_task = (target_twist is not None and target_mask is not None and extended_task_path is not None)
-
-    if has_task and target_twist.dim() > 1:
-        raise ValueError("仅支持单任务")
-
+    has_task = (target_twist is not None)
     total_rows = 6 * (num_loops + (1 if has_task else 0))
-    K_full = torch.zeros((total_rows, num_vars_full), device=device)
-    b = torch.zeros(total_rows, device=device)
 
+    K_compact = torch.zeros((total_rows, num_vars_reduced), device=device)
+    b = torch.zeros(total_rows, device=device)
     current_row = 0
 
-    # --- A. 填充闭环约束 ---
-    for loop_nodes in loops:
-        L = len(loop_nodes)
+    # --- 填充 Loop 约束 ---
+    for loop in loops:
+        L = len(loop)
         for i in range(L):
-            curr = loop_nodes[i]
-            next_node = loop_nodes[(i + 1) % L]
-            prev_node = loop_nodes[(i - 1 + L) % L]
-
+            curr, next_n, prev = loop[i], loop[(i + 1) % L], loop[(i - 1 + L) % L]
             screw = all_screws[curr]
-            col_out = curr * num_nodes + next_node
-            col_in = curr * num_nodes + prev_node
 
-            K_full[current_row: current_row + 6, col_out] += screw
-            K_full[current_row: current_row + 6, col_in] -= screw
+            if (curr, next_n) in edge_to_col:
+                K_compact[current_row:current_row + 6, edge_to_col[(curr, next_n)]] += screw
+            if (curr, prev) in edge_to_col:
+                K_compact[current_row:current_row + 6, edge_to_col[(curr, prev)]] -= screw
         current_row += 6
 
-    # --- B. 填充任务约束 ---
-    if has_task:
-        K_path = torch.zeros((6, num_vars_full), device=device)
-
-        # [修正] 遍历 extended_task_path (含 Ghost 节点)
-        # 结构: [Ghost_Prev, Start, ..., End, Ghost_Next]
-        # 遍历中间的实体节点，索引从 1 到 len-2
+    # --- 填充 Task 约束 ---
+    if has_task and extended_task_path:
+        row_slice = slice(current_row, current_row + 6)
         for i in range(1, len(extended_task_path) - 1):
             curr = extended_task_path[i]
-            prev_node = extended_task_path[i - 1]  # 可能为 None
-            next_node = extended_task_path[i + 1]  # 可能为 None
-
+            prev_n, next_n = extended_task_path[i - 1], extended_task_path[i + 1]
             screw = all_screws[curr]
 
-            # 出边 (去往 Next)
-            if next_node is not None:
-                col_out = curr * num_nodes + next_node
-                K_path[:, col_out] += screw
+            if next_n is not None and next_n >= 0 and (curr, next_n) in edge_to_col:
+                K_compact[row_slice, edge_to_col[(curr, next_n)]] += screw
+            if prev_n is not None and prev_n >= 0 and (curr, prev_n) in edge_to_col:
+                K_compact[row_slice, edge_to_col[(curr, prev_n)]] -= screw
 
-            # 入边 (来自 Prev)
-            if prev_node is not None:
-                col_in = curr * num_nodes + prev_node
-                K_path[:, col_in] -= screw
-
-        row_mask = (target_mask > 0.5).float().view(6, 1)
-        K_full[current_row: current_row + 6, :] = K_path * row_mask
-        b[current_row: current_row + 6] = target_twist * (target_mask > 0.5).float()
-
-    # =================================================================
-    # [核心] 矩阵瘦身 (Slimming Down)
-    # =================================================================
-
-    valid_mask = (structure[:, :, 0] > 0.5).view(-1)
-    if not valid_mask.any():
-        dummy_loss = torch.sum(1.0 - structure[:, :, 0]) * 100.0
-        return K_full, torch.zeros(num_vars_full, device=device), dummy_loss, None
-
-    K_reduced = K_full[:, valid_mask]
-    x_sol_full = torch.zeros(num_vars_full, device=device)
-    spectrum = None
-
-    # --- C. 统一求解 (SVD分解) ---
-    try:
-        if has_task:
-            # 增广矩阵法 [K_red | -b]
-            b_reduced = b.unsqueeze(1)
-            K_aug = torch.cat([K_reduced, -b_reduced], dim=1)
-
-            # SVD 分解
-            # 必须使用 full_matrices=True 以便在欠定系统(Rows < Cols)中获取完整的零空间基向量
-            U, S, Vh = torch.linalg.svd(K_aug, full_matrices=True)
-
-            # 提取解向量 (最小奇异值对应的右奇异向量 -> Vh 的最后一行)
-            v_min = Vh[-1, :]
-            x_reduced = v_min[:-1]
-            lambda_val = v_min[-1]
-
-            # 归一化 (强制 lambda=1)
-            if torch.abs(lambda_val) > 1e-6:
-                x_reduced = x_reduced / lambda_val
-            else:
-                x_reduced = x_reduced * 0.0
-
-            # 构造兼容的 Spectrum (升序特征值)
-            # 1. 平方 (Sigma^2 = Eigenvalue)
-            # 2. 翻转 (SVD是降序, EIGH是升序)
-            # 3. 补零 (如果 Rows < Cols，SVD 只返回 Rows 个值，剩下的都是 0)
-            num_vars_aug = K_aug.shape[1]
-            s_squared = (S ** 2)
-
-            # 补齐缺少的 0 特征值
-            padding_len = num_vars_aug - len(s_squared)
-            if padding_len > 0:
-                spectrum = torch.cat([torch.zeros(padding_len, device=device), s_squared.flip(0)])
-            else:
-                spectrum = s_squared.flip(0)
-
-            # 残差 = 最小奇异值的平方 (对应之前的 eigenvalue)
-            residual = spectrum[0]
-
+        if target_mask is not None:
+            K_compact[row_slice, :] *= target_mask.view(6, 1)
+            b[row_slice] = target_twist * target_mask
         else:
-            # 零空间求解 (K_reduced)
-            U, S, Vh = torch.linalg.svd(K_reduced, full_matrices=True)
+            b[row_slice] = target_twist
 
-            # 最小奇异值向量
-            x_reduced = Vh[-1, :]
+    # 4. SVD 求解
+    if has_task:
+        K_aug = torch.cat([K_compact, -b.unsqueeze(1)], dim=1)
+    else:
+        K_aug = K_compact
 
-            # 构造兼容 Spectrum
-            num_vars_red = K_reduced.shape[1]
-            s_squared = (S ** 2)
+    try:
+        U, S, Vh = torch.linalg.svd(K_aug, full_matrices=False)
 
-            padding_len = num_vars_red - len(s_squared)
-            if padding_len > 0:
-                spectrum = torch.cat([torch.zeros(padding_len, device=device), s_squared.flip(0)])
+        # Spectrum
+        num_vars_aug = K_aug.shape[1]
+        full_S = torch.zeros(num_vars_aug, dtype=S.dtype, device=device)
+        full_S[:S.shape[0]] = S
+        spectrum = torch.flip(full_S, dims=[0])
+
+        # 提取解向量 (最小奇异值对应的 Vh 行)
+        v_min = Vh[-1, :]
+
+        if has_task:
+            lambda_val = v_min[-1]
+            x_vars = v_min[:-1]
+            # 归一化 lambda=1
+            if torch.abs(lambda_val) > 1e-6:
+                x_vars = x_vars / lambda_val
             else:
-                spectrum = s_squared.flip(0)
-
+                x_vars = torch.zeros_like(x_vars)
+            residual = spectrum[0]
+        else:
+            x_vars = v_min
             residual = spectrum[0]
 
-        # 映射回全尺寸
-        x_sol_full.masked_scatter_(valid_mask, x_reduced)
+        return edge_to_col, K_compact, x_vars, residual, spectrum
 
     except Exception as e:
-        # 梯度保护
-        bad_gradient = torch.mean(torch.abs(K_full)) * 1000.0
-        return K_full, torch.zeros(num_vars_full, device=device), bad_gradient, None
-
-    # =================================================================
-    # [核心] 消除节点级规范自由度
-    # =================================================================
-    x_matrix = x_sol_full.view(num_nodes, num_nodes)
-    valid_mask_matrix = (structure[:, :, 0] > 0.5).float()
-
-    row_sums = torch.sum(x_matrix * valid_mask_matrix, dim=1, keepdim=True)
-    row_counts = torch.sum(valid_mask_matrix, dim=1, keepdim=True)
-    row_means = row_sums / (row_counts + 1e-8)
-
-    x_centered = x_matrix - row_means
-    x_matrix_clean = x_centered * valid_mask_matrix
-    x_sol_final = x_matrix_clean.view(-1)
-
-    return K_full, x_sol_final, residual, spectrum
+        return None, None, None, torch.tensor(100.0, device=device), None
 
 
 # ==============================================================================
 # 3. 核心 Loss 计算 (基于锚点速度的一致性)
 # ==============================================================================
 
-def compute_motion_consistency_loss(structure, q_current, loops, path_to_ee,
-                                    target_twists=None, target_masks=None, dt=1e-3):
+def compute_instantaneous_check_loss(structure, q_current, loops, path_to_ee,
+                                     target_twists=None, target_masks=None, dt=1e-3):
     """
-    基于 Anchor Velocity 的二阶全周一致性 Loss。
+    [IDOF 检测版] 运动可持续性检查
 
-    逻辑:
-    1. 针对每个任务模式，求解 T=0 时刻的一阶锚点速度 x0。
-    2. 更新锚点位置 Q_new = Q + x0 * dt。
-    3. 构建 T=dt 时刻的矩阵 K1。
-    4. 计算漂移 Drift = (K1 * x0 - K0 * x0) / dt。
-    5. 求解二阶加速度 x_ddot，并计算其与 x0 的法向偏差。
+    原理：
+    构造"虚拟环路"（即包含任务约束的雅可比矩阵），检查二阶漂移（Drift）是否落在
+    雅可比矩阵（K）的列空间内。
+
+    如果是瞬时运动 (IDOF)，Drift 将无法被 K 补偿，产生巨大的投影残差。
     """
     device = structure.device
-    num_nodes = structure.shape[0]
     total_loss = torch.tensor(0.0, device=device)
 
-    # 预构建扩展路径 (避免在循环中重复构建)
+    # 1. 扩展路径 (用于构建包含任务的 K 矩阵)
     extended_path = _build_extended_path(structure, path_to_ee)
 
     has_tasks = (target_twists is not None and target_masks is not None and len(target_twists) > 0)
@@ -348,64 +303,81 @@ def compute_motion_consistency_loss(structure, q_current, loops, path_to_ee,
         tgt_twist = target_twists[k] if has_tasks else None
         tgt_mask = target_masks[k] if has_tasks else None
 
-        # 1. 求解 T=0 时刻的一阶锚点速度 x0
-        # 返回: K, x, residual, spectrum
-        K0, x0, residual0, _ = solve_anchor_system(
+        # --- 步骤 1: 获取当前构型的 K 和 x0 ---
+        # 这里的 K_curr 实际上就是包含了"虚拟环路约束"（任务约束）的雅可比矩阵
+        mapping, K_curr, x0, resid0, _ = solve_anchor_system(
             structure, q_current, loops, extended_path, tgt_twist, tgt_mask
         )
 
-        # 归一化 x0 (防止数值过大导致微分失效，或数值过小导致精度丢失)
-        x_norm = torch.norm(x0)
-
-        # 如果速度极小(死锁) 或者 任务残差过大(不可达)，直接惩罚并跳过二阶计算
-        if x_norm < 1e-6 or (has_tasks and residual0 > 0.1):
-            total_loss += 1.0
+        # 基础检查：如果是死锁或当前位置就不闭合，直接重罚
+        if x0 is None:
             continue
 
+        # 归一化 x0 (单位速度，消除速度大小对 Drift 幅度的影响)
+        x_norm = torch.norm(x0)
+        if x_norm < 1e-6:
+            continue
         x0 = x0 / x_norm
 
-        # 2. 更新状态 (Q矩阵更新)
-        # Anchor Velocity 是锚点位置的时间导数，直接叠加
-        q_next = q_current + x0.view(num_nodes, num_nodes) * dt
+        # --- 步骤 2: 计算二阶漂移 (The "Bill") ---
+        # 我们使用有限差分来通过 PyTorch 自动计算李括号项 (J_dot * q_dot)
+        # 这比手动实现 _lie_bracket 更通用，且能自动处理复杂的螺旋轴变化
 
-        # 3. 构建 T=dt 时刻的矩阵 K1
-        # 我们只需要 K1，不需要求解
-        K1, _, _, _ = solve_anchor_system(
+        # 2.1 模拟向前走极小的一步
+        q_next = q_current.clone()
+        for (u, v), col_idx in mapping.items():
+            if col_idx < len(x0):
+                q_next[u, v] += x0[col_idx] * dt
+
+        # 2.2 获取新位置的 K (无需解方程，只要矩阵)
+        _, K_next, _, _, _ = solve_anchor_system(
             structure, q_next, loops, extended_path, tgt_twist, tgt_mask
         )
 
-        # 4. 计算漂移 (Drift)
-        # Drift = d(Kx)/dt = (K_new * x - K_old * x) / dt
-        # 对于有任务的情况 (Kx=b)，d(Kx-b)/dt = K_dot*x = 0，所以 drift 依然是衡量 K 变化的指标
-        term1 = K1 @ x0
-        term2 = K0 @ x0
-        drift = (term1 - term2) / dt
+        if K_next is None:
+            total_loss += 10.0;
+            continue
 
-        # 5. 求解二阶锚点加速度 x_ddot
-        # 方程: K0 * x_ddot = -drift
-        # 使用阻尼最小二乘求解线性方程组
-        H = K0.T @ K0
-        damping = 1e-4 * torch.eye(num_nodes * num_nodes, device=device)
-        rhs = K0.T @ (-drift)
+        # 2.3 计算漂移向量 Drift = (K_next - K_curr) * x0 / dt
+        # 物理含义：保持关节速度不变时，约束方程产生的破坏速度
+        drift_vec = (K_next @ x0 - K_curr @ x0) / dt
 
-        try:
-            x_ddot = torch.linalg.solve(H + damping, rhs)
-        except:
-            x_ddot = torch.zeros_like(x0)
+        # --- 步骤 3: 投影相容性测试 (The "Payment") ---
+        # 检查方程 K_curr * alpha = -drift 是否有解
+        # 如果有解，说明可以通过调整关节加速度 alpha 来消除漂移 -> 运动是可持续的
+        # 如果无解（残差大），说明是瞬时运动 -> IDOF
 
-        # 6. 一致性判据 (Consistency Metric)
-        # 投影: 计算 x_ddot 在 x0 方向上的垂直分量
-        proj = torch.dot(x_ddot, x0) * x0
-        x_perp = x_ddot - proj
+        # 使用伪逆进行投影: Projection = K * K_pinv
+        # Residual = (I - Projection) * drift
+        #          = drift - K * (K_pinv * drift)
 
-        # Loss: 漂移分量的模长
-        mode_loss = torch.norm(x_perp)
-        total_loss += mode_loss
+        # rcond=1e-3 用于忽略极小的奇异值噪声
+        K_pinv = torch.linalg.pinv(K_curr, rcond=1e-3)
 
-    if has_tasks:
-        return total_loss / num_modes
-    else:
-        return total_loss
+        # 尝试求解加速度 (best effort solution)
+        alpha_sol = K_pinv @ (-drift_vec)
+
+        # 实际能补偿的漂移
+        compensated_drift = K_curr @ alpha_sol
+
+        # --- 步骤 4: 计算残差 Loss ---
+        # residual_vec 代表了"无法被机构几何结构消解的二阶漂移"
+        # 对于平行四边形：几何结构完美，drift 虽大但完全在 K 的列空间内，Residual ≈ 0
+        # 对于瞬时机构：drift 指向 K 列空间之外，Residual >> 0
+
+        residual_vec = (-drift_vec) - compensated_drift
+        loss_idof = torch.norm(residual_vec)
+
+        # 标准化：除以 drift 的模长 (Ratio)
+        drift_norm = torch.norm(drift_vec)
+        if drift_norm > 1e-6:
+            loss_ratio = loss_idof / drift_norm
+        else:
+            loss_ratio = 0.0  # 几乎没有漂移，说明是直线机构，完美
+
+        total_loss += loss_ratio
+
+    return total_loss / num_modes if has_tasks else total_loss
 
 
 # ==============================================================================
@@ -588,10 +560,8 @@ def compute_mobility_loss_eigen(structure, q, loops, num_dof=1, gap_threshold=0.
 
     # 1. 调用求解器，获取特征值谱 (Spectrum)
     # 注意：这里我们不需要任务 (target_twist=None)，只关心机构本身的拓扑属性
-    _, _, _, spectrum = solve_anchor_system(
-        structure, q, loops,
-        extended_task_path=None, target_twist=None, target_mask=None,
-        return_spectrum=True
+    _, _, _, _, spectrum = solve_anchor_system(
+        structure, q, loops, None, None, None, return_spectrum=True
     )
 
     # 如果求解失败返回 None
@@ -660,7 +630,7 @@ def compute_task_loss_eigen(structure, q, loops, G_graph, config_ee_node, target
 
         if mask.bool().any():
             # 调用求解器，请求返回谱 (Spectrum)
-            _, _, _, spectrum = solve_anchor_system(
+            _, _, _, _, spectrum = solve_anchor_system(
                 structure, q, loops,
                 extended_task_path=extended_path,
                 target_twist=tgt,

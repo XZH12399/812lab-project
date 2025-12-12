@@ -89,7 +89,7 @@ generation:
 #  ee_node: 7
 
   # Evaluator 的硬性录取分数线 (Score >= threshold 才能进入增强数据集)
-  acceptance_threshold: 2.98
+  acceptance_threshold: 3.98
   rl_guidance_scale: 1.0
 
 # --- 5. 评估器与优化目标配置 ---
@@ -136,7 +136,7 @@ evaluator_config:
 #        - [0.0, 1.0, 0.0, null, null, null]
 
     check_global_consistency:
-      enable: false
+      enable: true
       weight: 1.0        # 在 Optimizer 中的权重，以及 Evaluator 评分的权重
       threshold: 0.05    # Evaluator 中的容忍阈值
 
