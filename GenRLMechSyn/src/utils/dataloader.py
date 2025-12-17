@@ -148,7 +148,10 @@ def get_dataloader(config, initial_manifest_path, augmented_manifest_path, batch
 
 
 def add_mechanisms_to_dataset(mechanisms_to_add, manifest_path):
-    # (保持不变)
+    """
+    将新生成的机构保存到数据集。
+    [新增] 支持保存 q_params (best_q) 到 .npz 文件中。
+    """
     if not mechanisms_to_add: return
 
     base_dir = os.path.dirname(manifest_path)
@@ -167,6 +170,10 @@ def add_mechanisms_to_dataset(mechanisms_to_add, manifest_path):
     for new_mech in mechanisms_to_add:
         tensor_numpy = new_mech['tensor']
         metadata = new_mech['metadata']
+
+        # [新增] 获取 q_params (如果存在)
+        q_params = new_mech.get('q_params', None)
+
         edge_list_to_save = []
         max_nodes_tensor = tensor_numpy.shape[0]
 
@@ -191,10 +198,18 @@ def add_mechanisms_to_dataset(mechanisms_to_add, manifest_path):
         npz_filename = f"{mech_id}.npz"
         filepath = os.path.join(base_dir, npz_filename)
         try:
-            np.savez(filepath, edge_list_array=np.array(edge_list_to_save, dtype=np.float32))
+            # [修改] 构造保存字典，如果有 q_params 则加入
+            save_dict = {'edge_list_array': np.array(edge_list_to_save, dtype=np.float32)}
+            if q_params is not None:
+                save_dict['q_params'] = q_params.astype(np.float32)
+
+            # 使用 **save_dict 解包参数
+            np.savez(filepath, **save_dict)
+
             manifest.append({"id": mech_id, "data_path": npz_filename, "metadata": metadata})
             successful_saves += 1
-        except:
+        except Exception as e:
+            print(f"保存机构 {mech_id} 失败: {e}")
             continue
 
     if successful_saves > 0:

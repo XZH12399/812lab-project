@@ -153,8 +153,10 @@ class RLAgent(nn.Module):
                 loss = F.mse_loss(predicted_scores, target_scores)
 
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
                 optimizer.step()
-                total_loss += loss.item()
+                if not torch.isnan(loss):
+                    total_loss += loss.item()
 
         if len(loader) == 0:
             return 0.0

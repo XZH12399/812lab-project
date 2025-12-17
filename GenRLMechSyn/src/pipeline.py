@@ -306,6 +306,11 @@ class TrainingPipeline:
                     tensor_norm = self._normalize(tensor_unnorm_torch)
                     score = entry.get('metadata', {}).get('score', 0.0)
 
+                    # --- NaN/Inf 检查 ---
+                    if torch.isnan(tensor_norm).any() or math.isnan(score) or math.isinf(score):
+                        self.logger.warning(f"跳过包含 NaN/Inf 的历史数据: {npz_path}")
+                        continue
+
                     experiences.append((tensor_norm, score, torch.tensor(label_idx, dtype=torch.long)))
 
             except Exception as e:
@@ -414,7 +419,9 @@ class TrainingPipeline:
                     if len(loop) >= 4: has_valid_loop = True; break
 
             if not has_valid_loop:
-                new_experiences.append((batch_x0_norm_pure[i], -1.0, target_labels[i]))
+                # 即使失败也加入，但需检查 NaN
+                if not torch.isnan(batch_x0_norm_pure[i]).any():
+                    new_experiences.append((batch_x0_norm_pure[i], -1.0, target_labels[i]))
                 continue
 
             # B. 调用独立优化函数 [核心]
@@ -423,6 +430,15 @@ class TrainingPipeline:
             best_x, best_q, best_metric, init_metric = self._optimize_mechanism(
                 i, x_init, loops, G, opt_config, weights, target_data
             )
+
+            # 检查优化结果有效性 (防止 None 或 NaN)
+            if best_x is None:
+                self.logger.warning(f"Mech {i}: 优化完全失败 (返回 None), 回退到初始值。")
+                best_x = x_init
+
+            if torch.isnan(best_x).any() or torch.isinf(best_x).any():
+                self.logger.warning(f"Mech {i}: 优化结果包含 NaN/Inf, 跳过录入。")
+                continue
 
             # C. 结果判定
             is_ok = best_metric < opt_config['tolerance']
@@ -445,36 +461,37 @@ class TrainingPipeline:
                 # 打印详细报告
                 print(f"\n  >>> [详细参数报告] Mech {i + 1:02d} (Score: {score:.4f}) <<<")
 
-                # best_q 现在是 (N, N) 矩阵
+                # 直接打印原始绝对锚点值，不进行相对转换
                 q_vals = best_q.detach().cpu().numpy()
-
                 if loops:
                     for loop_idx, path in enumerate(loops):
                         l_type = "Rigid" if len(path) < 4 else "Kinematic"
                         print(f"  --- Loop {loop_idx + 1}: {path} ({l_type}) ---")
                         L = len(path)
                         for idx, u in enumerate(path):
-                            v = path[(idx + 1) % L]
+                            v = path[(idx + 1) % L];
                             prev = path[(idx - 1 + L) % L]
-
-                            p = final_np[u, v]
+                            p = final_np[u, v];
                             t_str = "R" if p[1] > 0 else "P"
 
-                            # [修正] 针对 (N, N) 矩阵的取值逻辑
-                            # 关节变量 = 出边锚点(u->v) - 入边锚点(u->prev)
-                            q_out = q_vals[u, v]
-                            q_in = q_vals[u, prev]
-                            diff_q = q_out - q_in
+                            # 获取原始值
+                            q_out_raw = q_vals[u, v]
+                            q_in_raw = q_vals[u, prev]
 
-                            # (可选) 归一化显示到 [-pi, pi]
-                            import numpy as np
-                            diff_q = np.arctan2(np.sin(diff_q), np.cos(diff_q))
+                            # 获取 Offset 原始值 (p[4] 是 u->v 的 offset_out, final_np[u, prev, 4] 是 u->prev 的 offset_in)
+                            off_out_raw = p[4]
+                            off_in_raw = final_np[u, prev, 4]
 
-                            # Offset 差值
-                            d_val = p[4] - final_np[u, prev, 4]
-
-                            print(f"    [{u}|{t_str}] q={diff_q:.4f} --> a={p[2]:.4f}, al={p[3]:.4f}, d={d_val:.4f}")
+                            # 直接打印原始值
+                            print(f"    [{u}|{t_str}] q_in={q_in_raw:.4f}, q_out={q_out_raw:.4f} | "
+                                  f"off_in={off_in_raw:.4f}, off_out={off_out_raw:.4f} --> "
+                                  f"a={p[2]:.4f}, al={p[3]:.4f}")
                 print("-" * 60 + "\n")
+
+            # 检查 Score 的有效性
+            if math.isnan(score) or math.isinf(score):
+                self.logger.warning(f"Mech {i}: 评分为 NaN/Inf ({score}), 强制设为 -1.0")
+                score = -1.0
 
             # E. 收集结果
             new_experiences.append((best_x[0], score, target_labels[i]))
@@ -483,8 +500,13 @@ class TrainingPipeline:
                 if self.enable_augmentation:
                     good_mechanisms.append({
                         "tensor": final_np,
-                        "metadata": {"source": "soft_optimized", "score": score, "label": target_str,
-                                     "closure_error": best_metric}
+                        "q_params": best_q.detach().cpu().numpy(),
+                        "metadata": {
+                            "source": "soft_optimized",
+                            "score": score,
+                            "label": target_str,
+                            "closure_error": best_metric
+                        }
                     })
 
         # F. 结束统计
@@ -538,8 +560,9 @@ class TrainingPipeline:
 
         # 记录全局最优 (Across Restarts)
         best_metric_global = float('inf')
-        best_x_global = None
-        best_q_global = None
+        # 初始化为输入值而不是 None，防止所有尝试都失败时返回 None
+        best_x_global = x_init_raw.detach().clone()
+        best_q_global = torch.zeros((max_nodes, max_nodes), device=self.device)
         initial_metric_log = 0.0
 
         # [新增] 预计算末端路径 (用于一致性 Loss)
@@ -709,6 +732,16 @@ class TrainingPipeline:
             return
         self.logger.info("--- 步骤 3a: 训练 RL 智能体 ---")
         buffer_limit = self.config['training'].get('replay_buffer_limit', 50000)
+
+        # 再次清洗 new_experiences (双重保险)
+        valid_new = []
+        for e in new_experiences:
+            # e[0]: tensor, e[1]: score, e[2]: label
+            if not torch.isnan(e[0]).any() and not math.isnan(e[1]) and not math.isinf(e[1]):
+                valid_new.append(e)
+            else:
+                self.logger.warning("训练前发现无效经验 (NaN/Inf), 已剔除。")
+
         self.replay_buffer.extend(new_experiences)
         if len(self.replay_buffer) > buffer_limit:
             self.replay_buffer = self.replay_buffer[-buffer_limit:]

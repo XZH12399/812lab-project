@@ -5,6 +5,137 @@ from .utils import get_dh_matrix
 import networkx as nx
 
 
+# ==============================================================================
+# 0. 核心辅助函数: 多路径状态生成 (BFS with Phase Correction)
+# ==============================================================================
+
+def compute_multi_path_states(structure, joint_angles, base_node=0):
+    """
+    计算图中所有节点相对于 base_node 的全局位姿。
+
+    [核心逻辑移植自 optimizer_engine.py]
+    采用 BFS 遍历，支持多路径到达同一节点（用于闭环检测）。
+    处理了 "入边反向" 导致的 180 度相位差问题。
+
+    Args:
+        structure: (N, N, 5) 结构张量 [Exists, Type, a, alpha, offset]
+        joint_angles: (N, N) 关节角矩阵
+        base_node: 基座节点索引
+
+    Returns:
+        node_observations: Dict {node_id: [{'P':..., 'z':..., 'T':..., 'parent':...}, ...]}
+    """
+    device = structure.device
+    N = structure.shape[0]
+    node_observations = {}
+    expanded_nodes = set()
+
+    # 1. 确定 Base 的参考节点 (用于获取初始 offset_in)
+    # structure[0, :, 0] > 0.5 检查邻居 (Exists)
+    base_neighbors = torch.nonzero(structure[base_node, :, 0] > 0.5).view(-1).tolist()
+
+    # 如果是孤立点，直接返回空或仅包含自身
+    if not base_neighbors:
+        return {}
+
+    ref_node = base_neighbors[0]
+
+    T_base = torch.eye(4, device=device)
+
+    # --- Base 初始化 ---
+    node_observations[base_node] = []
+    node_observations[base_node].append({
+        'P': T_base[:3, 3],
+        'z': T_base[:3, 2],
+        'T': T_base,
+        'parent': ref_node
+    })
+
+    expanded_nodes.add(base_node)
+
+    # Stack: (current_node, parent_node, T_current)
+    # parent_node = -1 表示初始状态
+    stack = [(base_node, -1, T_base)]
+
+    PI = torch.tensor(math.pi, device=device)
+
+    while stack:
+        u, p, T_u = stack.pop()
+
+        # --- 准备 u 的入参 ---
+        # 这些参数代表 u->p (离开 u 指向父节点) 的参数
+        # 我们需要这些来计算与 u->v (离开 u 指向子节点) 的差分
+        if p == -1:
+            # Base 节点的虚拟入参
+            off_in = structure[u, ref_node, 4]
+            q_in = joint_angles[u, ref_node]
+        else:
+            off_in = structure[u, p, 4]
+            q_in = joint_angles[u, p]
+
+        # 遍历邻居
+        neighbors = torch.nonzero(structure[u, :, 0] > 0.5).view(-1).tolist()
+
+        for v in neighbors:
+            # 逻辑父节点判断 (防止立即回头)
+            logical_parent = ref_node if p == -1 else p
+            if v == logical_parent:
+                continue
+
+            # --- 提取参数: u -> v ---
+            # structure shape is (N, N, 5), so usage is [u, v, idx]
+            # 0:exists, 1:type, 2:a, 3:alpha, 4:offset
+
+            j_type = structure[u, v, 1]
+            a = structure[u, v, 2]
+            alpha = structure[u, v, 3]
+            off_out = structure[u, v, 4]
+            q_out = joint_angles[u, v]
+
+            # 差分计算 (Out - Stored_In)
+            delta_off = off_out - off_in
+            delta_q = q_out - q_in
+
+            is_R = (j_type > 0.5).float()  # R副 > 0.5
+            is_P = 1.0 - is_R
+
+            # 🌟 核心修正 (来自 optimizer_engine):
+            # 角度 theta 需要 +/- 180 度 (PI)。
+            # 因为 Stored_In (q_in) 是 u->p 的方向, 但物理上 "进入" u 的方向是 p->u。
+            # 这两个向量方向相反，定义在局部坐标系中相差 180 度。
+
+            # DH 参数分配
+            # 对于 R 副: theta 负责旋转 (包含相位修正), d 负责轴向距离
+            # 对于 P 副: theta 固定 (由 offset 决定), d 负责伸缩
+
+            theta = is_R * (delta_q - PI) + is_P * (delta_off - PI)
+            d = is_R * delta_off + is_P * delta_q
+
+            # 构建 DH 矩阵
+            T_step = get_dh_matrix(a, alpha, d, theta)
+            T_v = T_u @ T_step
+
+            # --- 记录观测 ---
+            if v not in node_observations:
+                node_observations[v] = []
+
+            node_observations[v].append({
+                'P': T_v[:3, 3],
+                'z': T_v[:3, 2],
+                'T': T_v,
+                'parent': u
+            })
+
+            # --- 递归控制 ---
+            # 即使 v 已经被访问过 (形成了闭环)，我们也记录观测值用于后续 Loss 计算
+            # 但只有第一次访问时才将其加入堆栈继续向下探索
+            if v not in expanded_nodes:
+                expanded_nodes.add(v)
+                stack.append((v, u, T_v))
+
+    return node_observations
+
+
 def _build_extended_path(structure, raw_path):
     """
     构建扩展路径 (Padding)，用于处理任务约束的边界条件。
@@ -37,102 +168,71 @@ def _build_extended_path(structure, raw_path):
 # 1. 基础运动学计算 (计算螺旋轴)
 # ==============================================================================
 
-def compute_all_joint_screws(structure, joint_angles, base_node=0):
+def compute_all_joint_screws(structure, joint_angles, base_node=0, normalize=True):
     """
     计算所有关节的瞬时螺旋轴。
+    现在调用 `compute_multi_path_states` 以保持逻辑一致性。
 
     Args:
-        structure: (N, N, 5) 结构张量
-        joint_angles: (N, N) 关节锚点矩阵 (Anchor Angles)
-        base_node: 基座节点索引
+        structure: (N, N, 5)
+        joint_angles: (N, N)
+        base_node: int
+        normalize: bool, 是否对力矩部分进行特征长度归一化
 
     Returns:
-        all_screws: (N, 6) 每个节点的单位螺旋轴
+        all_screws: (N, 6)
+        None: 占位符 (保持旧接口一致性)
     """
     device = structure.device
     N = structure.shape[0]
-    transforms_map = {}
-    screws_map = {}
-    visited = [False] * N
 
-    # 初始化基座
-    T_base = torch.eye(4, device=device)
-    transforms_map[base_node] = T_base
-    visited[base_node] = True
+    # 1. 获取所有节点状态
+    node_observations = compute_multi_path_states(structure, joint_angles, base_node)
 
-    # BFS 队列: (current_node, off_in_u, q_in_u)
-    # q_in_u: 进入该节点时的相位锚点
-    queue = [(base_node, torch.tensor(0.0, device=device), torch.tensor(0.0, device=device))]
+    screws = torch.zeros((N, 6), device=device)
 
-    TWO_PI = 2 * math.pi
+    # 2. 计算特征长度 L_char (用于归一化)
+    L_char = torch.tensor(1.0, device=device)
+    if normalize:
+        # 提取存在的边的长度
+        exists_mask = structure[:, :, 0] > 0.5
+        all_a = torch.abs(structure[:, :, 2][exists_mask])
+        valid_a = all_a[all_a > 1e-6]
+        if valid_a.numel() > 0:
+            L_char = torch.mean(valid_a)
 
-    head = 0
-    while head < len(queue):
-        u, off_in_u, q_in_u = queue[head]
-        head += 1
+    # 3. 计算每个节点的螺旋
+    for u in range(N):
+        if u not in node_observations:
+            continue
 
-        T_global_u = transforms_map[u]
+        # 取第一个观测作为权威状态
+        state = node_observations[u][0]
+        P = state['P']
+        z = state['z']
 
-        # --- 计算当前节点的螺旋 (Screw) ---
-        R_u = T_global_u[:3, :3]
-        p_u = T_global_u[:3, 3]
-        z_local = torch.tensor([0.0, 0.0, 1.0], device=device)
-        z_axis = R_u @ z_local
+        # 判断节点类型 (查看该节点连接出去的行类型，通常由入边决定，这里取行均值或检查任意连接)
+        # 在 structure (N, N, 5) 中，u 的类型属性通常在 structure[u, :, 1]
+        row_types = structure[u, :, 1]
+        # 如果行里大部分指示是 R (类型值 > 0), 则认为是 R 副
+        # 注意: 这里的判断需要根据具体数据约定，假设只要存在 R 连接即为 R 节点
+        is_R = not (row_types < -0.5).any()
 
-        j_type_val = torch.max(structure[u, :, 1])
-        is_R = (j_type_val > 0.0).float()
-        is_P = 1.0 - is_R
+        if is_R:
+            w = z
+            v = torch.linalg.cross(P, z)
 
-        w = is_R * z_axis
-        v_part = torch.linalg.cross(p_u, z_axis)
-        v = is_R * v_part + is_P * z_axis
-        screw_u = torch.cat([w, v], dim=0)
-        screws_map[u] = screw_u
+            if normalize:
+                v = v / L_char
 
-        # --- 传播到邻居 ---
-        neighbors = torch.nonzero(structure[u, :, 0] > 0.5).squeeze(1)
-        for v_idx in neighbors:
-            v = v_idx.item()
-            if not visited[v]:
-                params = structure[u, v]
-                a = torch.abs(params[2])
-                alpha = params[3] % TWO_PI
-
-                # 1. 几何参数差分
-                off_out = params[4]
-                delta_offset = off_out - off_in_u
-
-                # 2. 变量参数差分 (Anchor Difference)
-                # q_out - q_in
-                q_out = joint_angles[u, v]
-                delta_q = q_out - q_in_u
-
-                # 3. 分配 DH 参数
-                theta_val = is_R * delta_q + is_P * delta_offset
-                d_val = is_R * delta_offset + is_P * delta_q
-
-                T_step = get_dh_matrix(a, alpha, d_val, theta_val)
-                T_global_v = T_global_u @ T_step
-                transforms_map[v] = T_global_v
-                visited[v] = True
-
-                # 准备下一跳
-                off_in_v = structure[v, u, 4]
-                q_in_v = joint_angles[v, u]
-
-                queue.append((v, off_in_v, q_in_v))
-
-    # 组装结果
-    screw_list = []
-    zero_screw = torch.zeros(6, device=device)
-    for i in range(N):
-        if i in screws_map:
-            screw_list.append(screws_map[i])
+            screws[u] = torch.cat([w, v])
         else:
-            screw_list.append(zero_screw)
+            # P副: w=0, v=z (移动方向)
+            w = torch.zeros(3, device=device)
+            v = z
+            screws[u] = torch.cat([w, v])
 
-    all_screws = torch.stack(screw_list)
-    return all_screws, None
+    return screws, None
 
 
 # ==============================================================================
@@ -386,59 +486,46 @@ def compute_instantaneous_check_loss(structure, q_current, loops, path_to_ee,
 
 def compute_loop_errors(structure, joint_angles, loops):
     """
-    [修改版] 支持 q_opt 为 (N, N) 矩阵。
+    [修改版] 使用多路径状态一致性 (Closure Loop Consistency) 计算误差。
+    参考 optimizer_engine._loss_closure 实现。
     """
     device = structure.device
-    total_error = torch.tensor(0.0, device=device)
-    TWO_PI = 2 * math.pi
 
-    for path in loops:
-        T_cum = torch.eye(4, device=device)
-        L = len(path)
-        max_link_length = torch.tensor(0.0, device=device)
+    # 1. 如果没有环路，直接返回
+    if not loops:
+        return torch.tensor(0.0, device=device)
 
-        for i in range(L):
-            u = path[i]
-            v = path[(i + 1) % L]
-            prev = path[(i - 1 + L) % L]
+    # 2. 选取基准点 (取第一个 loop 的第一个点)
+    base_node = loops[0][0]
 
-            # 1. 提取结构参数
-            params = structure[u, v]
-            j_type = params[1]
-            a = torch.abs(params[2])
-            alpha = params[3] % TWO_PI
-            max_link_length = torch.max(max_link_length, a)
+    # 3. 调用核心 Helper 获取所有观测
+    node_observations = compute_multi_path_states(structure, joint_angles, base_node=base_node)
 
-            # 2. Offset 差分
-            off_out = structure[u, v, 4]
-            off_in = structure[u, prev, 4]
-            delta_offset = off_out - off_in
+    total_loss = torch.tensor(0.0, device=device)
+    count = 0
 
-            # 3. Anchor Difference
-            q_out = joint_angles[u, v]
-            q_in = joint_angles[u, prev]
-            delta_q = q_out - q_in
+    # 4. 计算观测方差
+    for node_id, obs_list in node_observations.items():
+        # 如果只有一个观测值，说明没有通过不同的环路到达该点，不存在闭环冲突
+        if len(obs_list) < 2:
+            continue
 
-            # 4. 分配变量
-            is_R = (j_type > 0).float()
-            is_P = 1.0 - is_R
+        # 以第一个观测值为基准 (Anchor)
+        ref_P = obs_list[0]['P']
+        ref_z = obs_list[0]['z']
 
-            theta = is_R * delta_q + is_P * delta_offset
-            d = is_R * delta_offset + is_P * delta_q
+        # 累加所有其他观测值与基准的偏差
+        for i in range(1, len(obs_list)):
+            curr_P = obs_list[i]['P']
+            curr_z = obs_list[i]['z']
 
-            # 5. 计算矩阵
-            T_step = get_dh_matrix(a, alpha, d, theta)
-            T_cum = T_cum @ T_step
+            loss_pos = torch.sum((curr_P - ref_P) ** 2)
+            loss_align = torch.sum((curr_z - ref_z) ** 2)
 
-        # 6. 计算误差
-        pos_err_abs = torch.sum(T_cum[:3, 3] ** 2)
-        scale_factor = max_link_length ** 2 + 1e-6
-        pos_err_rel = pos_err_abs / scale_factor
-        rot_err = torch.sum((T_cum[:3, :3] - torch.eye(3, device=device)) ** 2)
+            total_loss = total_loss + loss_pos + loss_align
+            count += 1
 
-        total_error = total_error + pos_err_rel + rot_err
-
-    return total_error
+    return total_loss
 
 
 def compute_bennett_geometry_error(structure, loops):
